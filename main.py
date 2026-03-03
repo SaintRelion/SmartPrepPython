@@ -7,7 +7,7 @@ from utils.cleaner import remove_repeated_lines
 from utils.db import db
 from typing import List, Optional
 
-# from utils.embeddings import embed_text
+from utils.embeddings import embed_text
 from utils.deepseek import generate_from_section, infer_structure
 import os
 
