@@ -18,7 +18,6 @@ RUN pip install -r requirements.txt
 
 COPY . /code
 
-RUN python manage.py migrate
 # Copy start.sh and make it executable
 COPY entrypoint.sh /code/entrypoint.sh
 RUN chmod +x /code/entrypoint.sh
