@@ -1,31 +1,20 @@
-from models import GenerateExamRequest
 from utils.db import db
 
 
-def select_sections(req: GenerateExamRequest):
+def select_sections(focus, difficulty, material):
 
-    if req.focus == "Specific Topic" and req.section_names:
-        placeholders = ",".join(["%s"] * len(req.section_names))
-        query = f"""
-            SELECT id, section_name, content
-            FROM SectionVector
-            WHERE document_id=%s
-            AND section_name IN ({placeholders})
-        """
-        params = tuple([req.document_id] + req.section_names)
-
-    elif req.focus == "Weak Areas":
+    if focus == "Weak Areas":
         weak_sections = db.select(
             """
             SELECT q.section_id
             FROM Questions q
             JOIN ExaminationResults r ON q.id = r.question_id
-            WHERE q.document_id=%s
+            WHERE q.material_id=%s
             GROUP BY q.section_id
             ORDER BY SUM(CASE WHEN r.is_correct=false THEN 1 ELSE 0 END) DESC
             LIMIT 3
         """,
-            (req.document_id,),
+            (material.material_id,),
         )
 
         ids = [w["section_id"] for w in weak_sections]
@@ -34,25 +23,25 @@ def select_sections(req: GenerateExamRequest):
             query = """
                 SELECT id, section_name, content
                 FROM SectionVector
-                WHERE document_id=%s
+                WHERE material_id=%s
             """
-            params = (req.document_id,)
+            params = (material.material_id,)
         else:
             placeholders = ",".join(["%s"] * len(ids))
             query = f"""
                 SELECT id, section_name, content
                 FROM SectionVector
-                WHERE document_id=%s
+                WHERE material_id=%s
                 AND id IN ({placeholders})
             """
-            params = tuple([req.document_id] + ids)
+            params = tuple([material.material_id] + ids)
 
     else:
         query = """
             SELECT id, section_name, content
             FROM SectionVector
-            WHERE document_id=%s
+            WHERE material_id=%s
         """
-        params = (req.document_id,)
+        params = (material.material_id,)
 
     return db.select(query, params)
