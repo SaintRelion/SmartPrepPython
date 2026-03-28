@@ -204,7 +204,7 @@ class AnalyticsController:
     @router.post("/get_personnel_stats", response_model=PersonnelAnalyticsResponse)
     async def get_personnel_stats_POST(req: StatsRequest) -> PersonnelAnalyticsResponse:
         # 1. Fetch all Reviewees
-        users = db.select("SELECT id, username FROM Users WHERE role = 'Reviewee'")
+        users = db.select("SELECT id, username FROM users WHERE role = 'Reviewee'")
         if not users:
             return PersonnelAnalyticsResponse(
                 avg_proficiency=0,
