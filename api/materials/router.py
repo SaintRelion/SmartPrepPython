@@ -25,11 +25,12 @@ class MaterialsController:
     async def upload_material_POST(
         req: MaterialUploadRequest = Depends(MaterialUploadRequest.as_form),
     ) -> MaterialUploadResponse:
+        original_name = req.file.filename if req.file.filename else req.fileName
+        clean_title = os.path.splitext(original_name)[0]
+        file_path = os.path.join("uploads", original_name)
 
-        clean_title = os.path.splitext(req.file.filename)[0]
-        file_path = os.path.join("uploads", req.file.filename)
+        os.makedirs("uploads", exist_ok=True)
 
-        # 1. Fast IO: Save the file
         with open(file_path, "wb") as f:
             f.write(await req.file.read())
 
@@ -45,7 +46,7 @@ class MaterialsController:
 
         return MaterialUploadResponse(
             status="success",
-            message="Module uploaded. Intelligence parsing started in background.",
+            message=f"Module '{clean_title}' uploaded. AI indexing is running in background.",
             material_id=material_id,
         )
 
