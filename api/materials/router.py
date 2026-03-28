@@ -15,7 +15,6 @@ from .models import (
     GetSectionsRequest,
 )
 from utils.db import db
-from utils.gemini import infer_structure_gemini
 
 router = APIRouter(prefix="/materials", tags=["Materials"])
 
