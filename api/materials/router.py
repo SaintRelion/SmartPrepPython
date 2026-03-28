@@ -25,9 +25,7 @@ class MaterialsController:
     async def upload_material_POST(
         req: MaterialUploadRequest = Depends(MaterialUploadRequest.as_form),
     ) -> MaterialUploadResponse:
-        original_name = req.file.filename if req.file.filename else req.file_name
-        clean_title = os.path.splitext(original_name)[0]
-        file_path = os.path.join("uploads", original_name)
+        file_path = os.path.join("uploads", req.file_name)
 
         os.makedirs("uploads", exist_ok=True)
 
@@ -37,7 +35,7 @@ class MaterialsController:
         # Database Induction: Create record with processed_by_ai = False
         material_id = db.insert(
             "INSERT INTO materials (document_path, title_content, processed_by_ai) VALUES (%s, %s, %s)",
-            (file_path, clean_title, False),
+            (file_path, req.file_name, False),
         )
 
         # Dispatch to Celery: Offload the heavy AI/Parsing logic
@@ -46,7 +44,7 @@ class MaterialsController:
 
         return MaterialUploadResponse(
             status="success",
-            message=f"Module '{clean_title}' uploaded. AI indexing is running in background.",
+            message=f"Module '{req.file_name}' uploaded. AI indexing is running in background.",
             material_id=material_id,
         )
 

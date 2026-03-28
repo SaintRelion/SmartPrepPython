@@ -13,7 +13,10 @@ class MaterialUploadRequest(BaseModel):
 
     @classmethod
     def as_form(
-        cls, file_name: str, file: UploadFile = File(...), use_gpu: bool = Form(False)
+        cls,
+        file: UploadFile = File(...),
+        file_name: str = "",
+        use_gpu: bool = Form(False),
     ):
         return cls(file=file, file_name=file_name, use_gpu=use_gpu)
 
