@@ -25,7 +25,7 @@ class MaterialsController:
     async def upload_material_POST(
         req: MaterialUploadRequest = Depends(MaterialUploadRequest.as_form),
     ) -> MaterialUploadResponse:
-        original_name = req.file.filename if req.file.filename else req.fileName
+        original_name = req.file.filename if req.file.filename else req.file_name
         clean_title = os.path.splitext(original_name)[0]
         file_path = os.path.join("uploads", original_name)
 
