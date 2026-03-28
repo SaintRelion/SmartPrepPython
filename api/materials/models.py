@@ -8,11 +8,14 @@ from typing import List
 # --- REQUEST MODELS ---
 class MaterialUploadRequest(BaseModel):
     file: UploadFile
+    file_name: str
     use_gpu: bool = False
 
     @classmethod
-    def as_form(cls, file: UploadFile = File(...), use_gpu: bool = Form(False)):
-        return cls(file=file, use_gpu=use_gpu)
+    def as_form(
+        cls, file_name: str, file: UploadFile = File(...), use_gpu: bool = Form(False)
+    ):
+        return cls(file=file, file_name=file_name, use_gpu=use_gpu)
 
 
 class GetSectionsRequest(BaseModel):
