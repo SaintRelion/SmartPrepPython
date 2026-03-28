@@ -26,7 +26,7 @@ class AIController:
         total_items = sum(m.items for m in req.materials)
         exam_id = db.insert(
             """
-            INSERT INTO Examinations (difficulty, focus, total_items, created_at)
+            INSERT INTO examinations (difficulty, focus, total_items, created_at)
             VALUES (%s, %s, %s, %s)
             """,
             (difficulty, focus, total_items, datetime.utcnow()),
@@ -38,7 +38,7 @@ class AIController:
         for material in req.materials:
             db.insert(
                 """
-                INSERT INTO Examination_Parts (exam_id, material_id, items)
+                INSERT INTO examination_parts (exam_id, material_id, items)
                 VALUES (%s, %s, %s)
                 """,
                 (exam_id, material.material_id, material.items),
@@ -66,7 +66,7 @@ class AIController:
                 section_id = q["_section_id"]
                 question_id = db.insert(
                     """
-                    INSERT INTO Questions
+                    INSERT INTO questions
                     (examination_id, material_id, section_id,
                      question_text, choices, correct_answer, difficulty)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)

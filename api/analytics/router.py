@@ -40,15 +40,15 @@ class AnalyticsController:
                 er.user_id, u.username, er.is_correct, er.student_answer,
                 q.id as q_id, q.question_text, q.correct_answer, q.choices, q.material_id, 
                 m.title_content as m_name, e.difficulty
-            FROM ExaminationResults er
-            JOIN Questions q ON er.question_id = q.id
+            FROM examination_results er
+            JOIN questions q ON er.question_id = q.id
             JOIN materials m ON q.material_id = m.id
-            JOIN Users u ON er.user_id = u.id
-            JOIN Examinations e ON er.examination_id = e.id
+            JOIN users u ON er.user_id = u.id
+            JOIN examinations e ON er.examination_id = e.id
             WHERE er.examination_id = %s {user_filter}
             AND er.attempt_index = (
                 SELECT MAX(attempt_index) 
-                FROM ExaminationResults 
+                FROM examination_results 
                 WHERE examination_id = er.examination_id AND user_id = er.user_id
             )
         """
@@ -219,8 +219,8 @@ class AnalyticsController:
                 er.user_id, er.is_correct, 
                 q.material_id, m.title_content as m_name,
                 q.section_id, s.section_name as s_name
-            FROM ExaminationResults er
-            JOIN Questions q ON er.question_id = q.id
+            FROM examination_results er
+            JOIN questions q ON er.question_id = q.id
             JOIN materials m ON q.material_id = m.id
             LEFT JOIN sections s ON q.section_id = s.id
             JOIN examinations e ON q.examination_id = e.id
