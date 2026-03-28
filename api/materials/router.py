@@ -45,7 +45,7 @@ class MaterialsController:
 
         return MaterialUploadResponse(
             status="success",
-            message="Module uploaded. Intelligence indexing started in background.",
+            message="Module uploaded. Intelligence parsing started in background.",
             material_id=material_id,
         )
 

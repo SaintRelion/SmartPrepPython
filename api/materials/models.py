@@ -43,5 +43,5 @@ class SectionItem(BaseModel):
 
 class MaterialUploadResponse(BaseModel):
     status: str
-    filename: str
+    message: str
     material_id: int
