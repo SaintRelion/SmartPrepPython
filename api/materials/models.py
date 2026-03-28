@@ -15,7 +15,7 @@ class MaterialUploadRequest(BaseModel):
     def as_form(
         cls,
         file: UploadFile = File(...),
-        file_name: str = "",
+        file_name: str = Form(...),
         use_gpu: bool = Form(False),
     ):
         return cls(file=file, file_name=file_name, use_gpu=use_gpu)
