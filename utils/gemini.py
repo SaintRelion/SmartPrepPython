@@ -1,12 +1,14 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from google import genai
 from google.genai import types
 import json
 
-# 1. Initialize the Client (Replaces genai.configure)
-client = genai.Client(api_key="AIzaSyDEit7V0S_3HCZagiHtAxfRCgFU8Tv72t8")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# 2. Define the Model Name and System Instruction
-# Note: Use 'gemini-2.0-flash' or 'gemini-1.5-flash' as 'gemini-3' is not a valid model string yet.
 MODEL_ID = "gemini-2.0-flash"
 SYSTEM_INSTRUCTION = """
 Analyze raw text chunks from a CJS document.
