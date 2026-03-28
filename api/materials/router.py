@@ -36,7 +36,7 @@ class MaterialsController:
 
         # Database Induction: Create record with processed_by_ai = False
         material_id = db.insert(
-            "INSERT INTO Materials (document_path, title_content, processed_by_ai) VALUES (%s, %s, %s)",
+            "INSERT INTO materials (document_path, title_content, processed_by_ai) VALUES (%s, %s, %s)",
             (file_path, clean_title, False),
         )
 
@@ -66,7 +66,7 @@ class MaterialsController:
         rows = db.select(
             """
             SELECT id, section_name
-            FROM Sections
+            FROM sections
             WHERE material_id=%s
             """,
             (req.material_id,),

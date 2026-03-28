@@ -38,7 +38,7 @@ class AuthController:
         try:
             new_id = db.insert(
                 """
-                INSERT INTO Users (username, password_hash, email, role, status)
+                INSERT INTO users (username, password_hash, email, role, status)
                 VALUES (%s, %s, %s, %s, %s)
                 """,
                 (user.username, hashed_pwd, user.email, user.role, "locked"),
@@ -55,7 +55,7 @@ class AuthController:
     async def login_POST(user: UserLogin) -> AuthResponse:
         # SQL updated to fetch status
         row = db.fetchone(
-            "SELECT id, password_hash, role, email, status FROM Users WHERE username = %s",
+            "SELECT id, password_hash, role, email, status FROM users WHERE username = %s",
             (user.username,),
         )
 
@@ -80,13 +80,13 @@ class AuthController:
     @staticmethod
     @router.get("/get_users", response_model=List[UserItem])
     async def get_users_GET() -> List[UserItem]:
-        users = db.select("SELECT id, username, email, role, status FROM Users")
+        users = db.select("SELECT id, username, email, role, status FROM users")
         return [UserItem(**u) for u in users]
 
     @staticmethod
     @router.post("/request_reset", response_model=GenericResponse)
     async def request_reset_POST(req: PasswordResetRequest) -> GenericResponse:
-        user = db.fetchone("SELECT id FROM Users WHERE email = %s", (req.email,))
+        user = db.fetchone("SELECT id FROM users WHERE email = %s", (req.email,))
 
         if not user:
             raise HTTPException(
@@ -120,7 +120,7 @@ class AuthController:
 
             hashed_pwd = hash_password(req.new_password)
             db.update(
-                "UPDATE Users SET password_hash = %s WHERE id = %s",
+                "UPDATE users SET password_hash = %s WHERE id = %s",
                 (hashed_pwd, user_id),
             )
 
@@ -134,7 +134,7 @@ class AuthController:
     @router.post("/update_user", response_model=GenericResponse)
     async def update_user_POST(req: UpdateUserRequest) -> GenericResponse:
         db.update(
-            "UPDATE Users SET username = %s, email = %s WHERE id = %s",
+            "UPDATE users SET username = %s, email = %s WHERE id = %s",
             (req.username, req.email, req.user_id),
         )
         return GenericResponse(status="success", message="Personnel data updated.")
@@ -144,7 +144,7 @@ class AuthController:
     async def toggle_status_POST(req: ToggleUserStatusRequest) -> DeleteResponse:
         # Strict update: only allow specific status transitions
         db.update(
-            "UPDATE Users SET status = %s WHERE id = %s",
+            "UPDATE users SET status = %s WHERE id = %s",
             (req.target_status, req.user_id),
         )
         return DeleteResponse(status="updated")
@@ -152,5 +152,5 @@ class AuthController:
     @staticmethod
     @router.get("/delete_user", response_model=DeleteResponse)
     async def delete_user_DELETE(req: DeleteUserRequest = Depends()) -> DeleteResponse:
-        db.delete("DELETE FROM Users WHERE id = %s", (req.user_id,))
+        db.delete("DELETE FROM users WHERE id = %s", (req.user_id,))
         return DeleteResponse(status="deleted")

@@ -34,14 +34,14 @@ class ReviewController:
                 e.id, e.focus, e.difficulty, e.created_at,
                 DATE(e.created_at) as session_date,
                 COUNT(DISTINCT er.user_id) as reviewee_count
-            FROM Examinations e
-            LEFT JOIN ExaminationResults er ON e.id = er.examination_id
+            FROM examinations e
+            LEFT JOIN examination_results er ON e.id = er.examination_id
             WHERE 1=1
         """
 
         if req.user_id:
             # If filtering for a specific user's history, we ensure they have at least one result
-            sql += " AND e.id IN (SELECT examination_id FROM ExaminationResults WHERE user_id = %s)"
+            sql += " AND e.id IN (SELECT examination_id FROM examination_results WHERE user_id = %s)"
             params.append(req.user_id)
 
         if req.focus:
@@ -76,7 +76,7 @@ class ReviewController:
     @staticmethod
     @router.get("/get_exam", response_model=ExamOut)
     async def get_exam_GET(req: ExamGetRequest = Depends()) -> ExamOut:
-        exam_rows = db.select("SELECT * FROM Examinations WHERE id=%s", (req.exam_id,))
+        exam_rows = db.select("SELECT * FROM examinations WHERE id=%s", (req.exam_id,))
         if not exam_rows:
             raise HTTPException(status_code=404, detail="Exam not found")
         exam = exam_rows[0]
@@ -89,7 +89,7 @@ class ReviewController:
         user_attempts = attempt_rows[0]["attempts"] if attempt_rows else 0
 
         q_rows = db.select(
-            "SELECT id, question_text, choices, correct_answer FROM Questions WHERE examination_id=%s ORDER BY id ASC",
+            "SELECT id, question_text, choices, correct_answer FROM questions WHERE examination_id=%s ORDER BY id ASC",
             (req.exam_id,),
         )
         questions = [QuestionOut.model_validate(q) for q in q_rows]
@@ -134,7 +134,7 @@ class ReviewController:
 
             db.insert(
                 """
-                INSERT INTO ExaminationResults 
+                INSERT INTO examination_results 
                 (user_id, examination_id, question_id, student_answer, is_correct, answered_at, attempt_index)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
