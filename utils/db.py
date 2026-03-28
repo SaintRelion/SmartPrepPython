@@ -1,11 +1,19 @@
 import mysql.connector
 from typing import Any, List, Dict
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class Database:
-    def __init__(self, host, user, password, database):
+    def __init__(self):
         self.conn = mysql.connector.connect(
-            host=host, user=user, password=password, database=database
+            host=os.getenv("DB_HOST"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            database=os.getenv("DB_NAME"),
         )
         self.cursor = self.conn.cursor(dictionary=True)
 
@@ -36,4 +44,4 @@ class Database:
 
 
 # Initialize
-db = Database(host="localhost", user="root", password="mysql", database="smart_prep")
+db = Database()
