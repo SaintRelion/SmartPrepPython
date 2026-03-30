@@ -1,12 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 import os
-import json
-import requests
-import PyPDF2
 from typing import List
 
-from utils.tasks import process_material_task
+from tasks import process_material_task
 
+from utils.connection import manager
 from .models import (
     MaterialUploadRequest,
     MaterialUploadResponse,
@@ -49,10 +47,10 @@ class MaterialsController:
         )
 
     @staticmethod
-    @router.get("/get_materials_GET", response_model=List[MaterialListItem])
+    @router.get("/get_materials", response_model=List[MaterialListItem])
     async def get_materials_GET() -> List[MaterialListItem]:
         rows = db.select(
-            "SELECT id, document_path, title_content, created_at FROM materials"
+            "SELECT id, document_path, title_content, processed_by_ai, created_at FROM materials ORDER BY created_at DESC"
         )
         return [MaterialListItem(**r) for r in rows]
 

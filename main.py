@@ -6,6 +6,7 @@ from api.review.router import router as reviewee_router
 from api.analytics.router import router as analytics_router
 
 
+from api.websocket.router import router as websocket_router
 from api.sr_libs.router import router as sr_libs_router
 
 app = FastAPI()
@@ -16,5 +17,6 @@ app.include_router(ai_router)
 app.include_router(reviewee_router)
 app.include_router(analytics_router)
 
+app.include_router(websocket_router)
 
 app.include_router(sr_libs_router)
