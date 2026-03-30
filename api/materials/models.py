@@ -30,6 +30,7 @@ class MaterialListItem(BaseModel):
     id: int
     document_path: str
     title_content: str
+    processed_by_ai: int
     created_at: str
 
     @field_validator("created_at", mode="before")

@@ -17,6 +17,15 @@ class Database:
         )
         self.cursor = self.conn.cursor(dictionary=True)
 
+    def execute(self, query: str, params: tuple = ()) -> int:
+        """
+        Generic executor for UPDATE, DELETE, or any command
+        that doesn't return a result set.
+        """
+        self.cursor.execute(query, params)
+        self.conn.commit()
+        return self.cursor.rowcount
+
     def select(self, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         self.conn.commit()
         self.cursor.execute(query, params)
