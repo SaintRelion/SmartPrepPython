@@ -2,14 +2,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 from fastapi import UploadFile, File, Form
-from typing import List
+from typing import List, Optional
 
 
 # --- REQUEST MODELS ---
 class MaterialUploadRequest(BaseModel):
     file: UploadFile
     file_name: str
-    use_gpu: bool = False
 
     @classmethod
     def as_form(
@@ -19,6 +18,10 @@ class MaterialUploadRequest(BaseModel):
         use_gpu: bool = Form(False),
     ):
         return cls(file=file, file_name=file_name, use_gpu=use_gpu)
+
+
+class GetMaterialsRequest(BaseModel):
+    processed_by_ai: Optional[int] = None
 
 
 class GetSectionsRequest(BaseModel):

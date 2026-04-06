@@ -4,13 +4,14 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from datetime import datetime
 
+from tasks import process_exam_generation_task
 from utils.db import db
 from .models import (
+    AdminExamStatusOut,
     DailyExamListGroup,
     ExamListOut,
     ExamOut,
     QuestionOut,
-    AnswerIn,
     SubmissionSummary,
     ExamListRequest,
     ExamGetRequest,
@@ -21,6 +22,44 @@ router = APIRouter(prefix="/review", tags=["Reviewee"])
 
 
 class ReviewController:
+    @staticmethod
+    @router.get("/admin_list_exams")
+    async def admin_list_exams_GET() -> List[AdminExamStatusOut]:
+        sql = """
+            SELECT 
+                e.*,
+                (SELECT COUNT(*) FROM questions WHERE examination_id = e.id) as generated_count
+            FROM examinations e
+            ORDER BY e.created_at DESC
+        """
+        rows = db.select(sql)
+
+        results = []
+        for r in rows:
+            exam = AdminExamStatusOut.model_validate(r)
+            # Grab all questions for the popup
+            q_sql = "SELECT id, question_text, choices, correct_answer FROM questions WHERE examination_id = %s"
+            q_rows = db.select(q_sql, (exam.id,))
+            exam.questions = [QuestionOut.model_validate(q) for q in q_rows]
+            results.append(exam)
+
+        return results
+
+    @router.post("/sync_pending_examinations")
+    async def sync_pending_examinations_POST():
+        # BD AMPL KOS: Recovery logic for stalled generation tasks
+        pending = db.select("SELECT id FROM examinations WHERE processed_by_ai = 0")
+
+        for item in pending:
+            # Re-trigger the background task
+            process_exam_generation_task.delay(item["id"])
+
+        return {
+            "status": "success",
+            "queued_count": len(pending),
+            "message": f"Forensic recovery successful. {len(pending)} examinations re-queued.",
+        }
+
     @staticmethod
     @router.get("/list_exams", response_model=List[DailyExamListGroup])
     async def list_exams_GET(
@@ -36,7 +75,7 @@ class ReviewController:
                 COUNT(DISTINCT er.user_id) as reviewee_count
             FROM examinations e
             LEFT JOIN examination_results er ON e.id = er.examination_id
-            WHERE 1=1
+            WHERE e.processed_by_ai = 2
         """
 
         if req.user_id:

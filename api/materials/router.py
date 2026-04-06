@@ -6,6 +6,7 @@ from tasks import process_material_task
 
 from utils.connection import manager
 from .models import (
+    GetMaterialsRequest,
     MaterialUploadRequest,
     MaterialUploadResponse,
     MaterialListItem,
@@ -38,7 +39,7 @@ class MaterialsController:
 
         # Dispatch to Celery: Offload the heavy AI/Parsing logic
         # We pass use_gpu (Ollama toggle) so Celery knows which engine to use
-        process_material_task.delay(material_id, file_path, req.use_gpu)
+        process_material_task.delay(material_id, file_path)
 
         return MaterialUploadResponse(
             status="success",
@@ -48,10 +49,20 @@ class MaterialsController:
 
     @staticmethod
     @router.get("/get_materials", response_model=List[MaterialListItem])
-    async def get_materials_GET() -> List[MaterialListItem]:
-        rows = db.select(
-            "SELECT id, document_path, title_content, processed_by_ai, created_at FROM materials ORDER BY created_at DESC"
-        )
+    async def get_materials_GET(
+        req: GetMaterialsRequest = Depends(),
+    ) -> List[MaterialListItem]:
+        query = "SELECT id, document_path, title_content, processed_by_ai, created_at FROM materials"
+        params = []
+
+        if req.processed_by_ai >= 0:
+            print(req.processed_by_ai)
+            query += " WHERE processed_by_ai = %s"
+            params.append(req.processed_by_ai)
+
+        query += " ORDER BY created_at DESC"
+
+        rows = db.select(query, tuple(params))
         return [MaterialListItem(**r) for r in rows]
 
     @staticmethod
@@ -68,3 +79,18 @@ class MaterialsController:
             (req.material_id,),
         )
         return [SectionItem(**r) for r in rows]
+
+    @router.post("/sync_pending_materials")
+    async def sync_pending_materials_POST():
+        pending = db.select(
+            "SELECT id, document_path FROM materials WHERE processed_by_ai = 0"
+        )
+
+        for item in pending:
+            process_material_task.delay(item["id"], item["document_path"])
+
+        return {
+            "status": "success",
+            "queued_count": len(pending),
+            "message": f"Re-queued {len(pending)} pending modules.",
+        }
