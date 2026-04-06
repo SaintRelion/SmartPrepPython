@@ -1,30 +1,19 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Dict
+
 
 # --- REQUEST MODELS ---
-
-
-class MaterialRequest(BaseModel):
-    material_id: int
-    items: int
-
-
-class GenerateExamRequest(BaseModel):
-    focus: str
-    difficulty: str
-    materials: List[MaterialRequest]
+class ExamGenerationRequest(BaseModel):
+    difficulty: str  # e.g., "Easy", "Hard"
+    focus: str  # e.g., "Vocabulary", "Concepts"
+    total_items: int
+    # Dictionary: { "material_id": item_count }
+    # e.g., {"101": 5, "102": 10}
+    materials: Dict[str, int]
 
 
 # --- RESPONSE MODELS ---
-
-
-class GeneratedQuestion(BaseModel):
-    id: int
-    material_id: int
-    question_text: str
-    choices: List[str]
-    correct_answer: str
-
-
-class AIErrorResponse(BaseModel):
-    error: str
+class ExamGenerationResponse(BaseModel):
+    status: str
+    message: str
+    examination_id: int

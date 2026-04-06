@@ -7,8 +7,8 @@ def select_sections(focus, difficulty, material):
         weak_sections = db.select(
             """
             SELECT q.section_id
-            FROM Questions q
-            JOIN ExaminationResults r ON q.id = r.question_id
+            FROM questions q
+            JOIN examinations_results r ON q.id = r.question_id
             WHERE q.material_id=%s
             GROUP BY q.section_id
             ORDER BY SUM(CASE WHEN r.is_correct=false THEN 1 ELSE 0 END) DESC
@@ -22,7 +22,7 @@ def select_sections(focus, difficulty, material):
         if not ids:
             query = """
                 SELECT id, section_name, content
-                FROM SectionVector
+                FROM sections
                 WHERE material_id=%s
             """
             params = (material.material_id,)
@@ -30,7 +30,7 @@ def select_sections(focus, difficulty, material):
             placeholders = ",".join(["%s"] * len(ids))
             query = f"""
                 SELECT id, section_name, content
-                FROM SectionVector
+                FROM sections
                 WHERE material_id=%s
                 AND id IN ({placeholders})
             """
@@ -39,7 +39,7 @@ def select_sections(focus, difficulty, material):
     else:
         query = """
             SELECT id, section_name, content
-            FROM SectionVector
+            FROM sections
             WHERE material_id=%s
         """
         params = (material.material_id,)

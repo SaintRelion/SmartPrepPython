@@ -1,73 +1,106 @@
-import ollama
 import json
+from typing import Any, Dict, List
+from ollama import Client
 
-OLLAMA_MODEL = "qwen3.5:0.8b"
+OLLAMA_HOST = "http://13.219.64.180:11434"
+OLLAMA_MODEL = "qwen3.5:35b"
+
+client = Client(host=OLLAMA_HOST, timeout=300.0)
 
 
-def infer_structure_ollama(chunk: str, previous_section: str = "Introduction"):
-    """
-    Forensic Structure Inference using Local Ollama.
-    """
-    system_instruction = """
-    Analyze raw text from a CJS document. 
-    Ignore headers, footers, and page numbers.
-    Return ONLY a JSON object where keys are headings and values are content.
+def infer_structure_ollama(chunk: str, previous_section: str = None):
+    system_instruction = f"""
+    You are a Document Structure Extractor. 
+    Analyze the text and return ONLY a FLAT JSON object.
+
+    CONTEXT RULE:
+    The last section identified was "{previous_section}". 
+    - If the current text starts as a continuation of "{previous_section}", use "{previous_section}" as the key for that content.
+    - If the text moves to a new topic, identify the new Heading and use it as a new key.
+
+    CLEANING & FORMATTING RULES:
+    1. Ignore all repeating headers/footers (school names, addresses, page numbers).
+    2. For any tables or grid-like data, represent them using "||" as column separators.
+    3. Bundle lists into the string value of their parent heading.
+    4. No nested JSON. No thinking tags. Output ONLY JSON.
     """
 
     prompt = f"""
-    The previous section was: "{previous_section}".
-    Analyze this chunk:
-    1. Continue "{previous_section}" if the text belongs there.
-    2. Identify new headings if present.
-    
-    TEXT:
+    INPUT TEXT:
     {chunk}
+
+    TASK:
+    1. Extract the logical headings and their corresponding body text.
+    2. If the text continues a previous topic, use the exact key provided in the system instructions.
+    3. Use "||" to separate columns if you encounter a table.
+    4. Remove all page headers, footers, institutional names, and repeated addresses.
+    5. Ensure the output is a single-level JSON object.
     """
 
-    try:
-        response = ollama.generate(
-            model=OLLAMA_MODEL,
-            system=system_instruction,
-            prompt=prompt,
-            format="json",  # Forces Ollama to return valid JSON
-            options={"temperature": 0.2, "top_p": 0.9},
-        )
+    response = client.generate(
+        model=OLLAMA_MODEL,
+        system=system_instruction,
+        prompt=prompt,
+        stream=False,
+        think=False,
+        format="json",
+        options={"temperature": 0.1, "num_ctx": 8192},
+    )
 
-        return json.loads(response["response"])
-    except Exception as e:
-        print(f"Ollama Extraction Error: {e}")
-        return {previous_section: chunk}
+    return json.loads(response["response"])
 
 
-def generate_exam_ollama(difficulty, section_name, content, num_items):
-    """
-    Generate questions using Local Ollama.
-    """
-    difficulty_guide = {
-        "Easy": "basic recall",
-        "Moderate": "application",
-        "Hard": "critical scenario analysis",
-    }
+def generate_exam_ollama(
+    difficulty: str, section_name: str, content: str, num_items: int
+) -> List[Dict[str, Any]]:
+    system_instruction: str = (
+        "You are a Criminology Board Examiner. Your task is to generate valid JSON only. "
+        "CRITICAL RULES:\n"
+        "1. Output MUST be a FLAT JSON ARRAY [].\n"
+        "2. Each object MUST have exactly 3 keys: 'question_text', 'choices', and 'correct_answer'.\n"
+        "3. NEVER nest 'correct_answer' inside the 'choices' object.\n"
+        "4. DO NOT include any preamble, thinking tags, or markdown code blocks."
+    )
 
     prompt = f"""
-    Generate {num_items} multiple-choice questions from: {section_name}
-    Difficulty: {difficulty_guide.get(difficulty, "basic")}
+    ### TASK
+    Generate exactly {num_items} multiple-choice questions for the Criminologist Licensure Examination (CLE).
     
-    CONTENT:
+    ### PARAMETERS
+    - DIFFICULTY: {difficulty}
+    - SECTION: {section_name}
+    
+    ### CONTENT_TO_PROCESS
+    <content>
     {content}
+    </content>
     
-    Return a JSON array of objects: 
-    [ {{"question_text": "", "choices": {{"A":"", "B":"", "C":"", "D":""}}, "correct_answer": "A"}} ]
+    ### REQUIRED_JSON_STRUCTURE_EXAMPLE
+    [
+      {{
+        "question_text": "Sample question here?",
+        "choices": {{"A": "Choice 1", "B": "Choice 2", "C": "Choice 3", "D": "Choice 4"}},
+        "correct_answer": "A"
+      }}
+    ]
+
+    ### EXECUTION
+    Generate {num_items} questions now following the exact structure above:
     """
 
-    try:
-        response = ollama.generate(
-            model=OLLAMA_MODEL,
-            prompt=prompt,
-            format="json",
-            options={"temperature": 0.8},
-        )
-        return json.loads(response["response"])
-    except Exception as e:
-        print(f"Ollama Generation Error: {e}")
-        return []
+    response = client.generate(
+        model=OLLAMA_MODEL,
+        system=system_instruction,
+        prompt=prompt,
+        stream=False,
+        think=False,
+        format="json",
+        options={
+            "temperature": 0.7,
+            "num_ctx": 8192,
+            "num_predict": 4096,
+        },
+    )
+
+    # If infer works with this line, generate will too
+    return json.loads(response["response"])

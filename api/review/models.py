@@ -1,10 +1,44 @@
 import json
 
 from pydantic import BaseModel, field_validator
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
+
 # --- REQUEST MODELS ---
+class QuestionOut(BaseModel):
+    id: int
+    question_text: str
+    choices: Dict[str, str]
+    correct_answer: str
+
+    @field_validator("choices", mode="before")
+    @classmethod
+    def parse_choices(cls, v: Any):
+        return json.loads(v) if isinstance(v, str) else v
+
+
+class AdminExamStatusOut(BaseModel):
+    id: int
+    focus: str
+    difficulty: str
+    total_items: int
+    material_config: Dict[str, int]
+    processed_by_ai: int
+    created_at: datetime
+
+    generated_count: int = 0
+    questions: List[QuestionOut] = []
+
+    @property
+    def status_label(self) -> str:
+        status_map = {0: "Pending", 1: "Processing", 2: "Completed", 3: "Error"}
+        return status_map.get(self.processed_by_ai, "Unknown")
+
+    @field_validator("material_config", mode="before")
+    @classmethod
+    def parse_json_config(cls, v: Any):
+        return json.loads(v) if isinstance(v, str) else v
 
 
 class ExamListRequest(BaseModel):
