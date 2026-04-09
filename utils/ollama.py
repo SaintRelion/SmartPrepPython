@@ -14,16 +14,16 @@ def infer_structure_ollama(chunk: str, previous_section: str = None):
     You are a Document Structure Extractor. 
     Analyze the text and return ONLY a FLAT JSON object.
 
-    CONTEXT RULE:
-    The last section identified was "{previous_section}". 
-    - If the current text starts as a continuation of "{previous_section}", use "{previous_section}" as the key for that content.
-    - If the text moves to a new topic, identify the new Heading and use it as a new key.
+    STRICT HIERARCHY RULES:
+    1. HEADING DETECTION: Actively scan for NEW topics (e.g., "I.", "Section 12", "CUSTODIAL INVESTIGATION"). Use these as NEW keys.
+    2. CONTINUATION: Only use "{previous_section}" if the text is clearly a mid-sentence continuation of the previous chunk.
+    3. KEY LENGTH: Keep keys (headings) under 10 words. NEVER use a paragraph as a key.
+    4. JSON FORMATTING: Do not use nested objects. Use the format: {{"Heading": "Content"}}.
 
-    CLEANING & FORMATTING RULES:
-    1. Ignore all repeating headers/footers (school names, addresses, page numbers).
-    2. For any tables or grid-like data, represent them using "||" as column separators.
-    3. Bundle lists into the string value of their parent heading.
-    4. No nested JSON. No thinking tags. Output ONLY JSON.
+    CLEANING RULES:
+    1. Ignore repeating headers/footers and page numbers.
+    2. Use "||" for tables.
+    3. IMPORTANT: Escape all double quotes (\") inside the text to prevent JSON errors.
     """
 
     prompt = f"""
@@ -72,43 +72,42 @@ def infer_structure_ollama(chunk: str, previous_section: str = None):
             return {previous_section or "Unstructured Content": raw_response}
 
 
+def clean_json_response(raw_str):
+    """Forensic repair for Ollama's common JSON mistakes."""
+    # Remove thinking tags and markdown
+    clean = re.sub(r"<think>.*?</think>", "", raw_str, flags=re.DOTALL)
+    clean = re.sub(r"```json|```", "", clean).strip()
+
+    # Simple bracket balancing
+    if clean.startswith("[") and not clean.endswith("]"):
+        clean += "]"
+    if clean.startswith("{") and not clean.endswith("}"):
+        clean += "}"
+
+    try:
+        return json.loads(clean)
+    except:
+        # If it's really messy, try to extract anything that looks like a JSON array
+        match = re.search(r"\[.*\]", clean, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except:
+                pass
+        return None
+
+
 def generate_exam_ollama(
     difficulty: str, section_name: str, content: str, num_items: int
 ) -> List[Dict[str, Any]]:
-    system_instruction: str = (
-        "You are a Criminology Board Examiner. Your task is to generate valid JSON only. "
-        "CRITICAL RULES:\n"
-        "1. Output MUST be a FLAT JSON ARRAY [].\n"
-        "2. Each object MUST have exactly 3 keys: 'question_text', 'choices', and 'correct_answer'.\n"
-        "3. NEVER nest 'correct_answer' inside the 'choices' object.\n"
-        "4. DO NOT include any preamble, thinking tags, or markdown code blocks."
+    system_instruction = (
+        "You are a Criminology Board Examiner. Return ONLY a raw JSON array. "
+        "RULES: 1. No preamble. 2. 'choices' must be an object with keys A,B,C,D. "
+        "3. 'correct_answer' must be the letter only (A, B, C, or D). "
+        "4. Escape all double quotes in text."
     )
 
-    prompt = f"""
-    ### TASK
-    Generate exactly {num_items} multiple-choice questions for the Criminologist Licensure Examination (CLE).
-    
-    ### PARAMETERS
-    - DIFFICULTY: {difficulty}
-    - SECTION: {section_name}
-    
-    ### CONTENT_TO_PROCESS
-    <content>
-    {content}
-    </content>
-    
-    ### REQUIRED_JSON_STRUCTURE_EXAMPLE
-    [
-      {{
-        "question_text": "Sample question here?",
-        "choices": {{"A": "Choice 1", "B": "Choice 2", "C": "Choice 3", "D": "Choice 4"}},
-        "correct_answer": "A"
-      }}
-    ]
-
-    ### EXECUTION
-    Generate {num_items} questions now following the exact structure above:
-    """
+    prompt = f"Generate {num_items} MCQs for {section_name} ({difficulty}).\nContent: {content[:4000]}"
 
     response = client.generate(
         model=OLLAMA_MODEL,
@@ -117,12 +116,7 @@ def generate_exam_ollama(
         stream=False,
         think=False,
         format="json",
-        options={
-            "temperature": 0.7,
-            "num_ctx": 8192,
-            "num_predict": 4096,
-        },
+        options={"temperature": 0.2, "num_ctx": 8192, "num_predict": 3000},
     )
 
-    # If infer works with this line, generate will too
-    return json.loads(response["response"])
+    return clean_json_response(response["response"])
