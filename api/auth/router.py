@@ -150,7 +150,7 @@ class AuthController:
         return DeleteResponse(status="updated")
 
     @staticmethod
-    @router.get("/delete_user", response_model=DeleteResponse)
-    async def delete_user_DELETE(req: DeleteUserRequest = Depends()) -> DeleteResponse:
+    @router.post("/delete_user", response_model=DeleteResponse)
+    async def delete_user_DELETE(req: DeleteUserRequest) -> DeleteResponse:
         db.delete("DELETE FROM users WHERE id = %s", (req.user_id,))
         return DeleteResponse(status="deleted")

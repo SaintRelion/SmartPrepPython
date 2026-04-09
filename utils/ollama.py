@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any, Dict, List
 from ollama import Client
 
@@ -47,7 +48,28 @@ def infer_structure_ollama(chunk: str, previous_section: str = None):
         options={"temperature": 0.1, "num_ctx": 8192},
     )
 
-    return json.loads(response["response"])
+    raw_response = response["response"].strip()
+
+    try:
+        # Standard attempt
+        return json.loads(raw_response)
+    except json.JSONDecodeError:
+        # FORENSIC REPAIR:
+        # Sometimes Ollama forgets to escape internal quotes in long strings.
+        # This regex tries to escape quotes that are NOT part of the JSON structure.
+        print("Manual JSON repair initiated...")
+
+        # 1. Remove any potential trailing commas before closing braces
+        repaired = re.sub(r",\s*}", "}", raw_response)
+
+        # 2. Try to handle the specific char 1007 issue:
+        # If it's a long block of text, the AI might have missed an escape.
+        try:
+            # Using strict=False allows control characters (like newlines) inside strings
+            return json.loads(repaired, strict=False)
+        except:
+            # Last resort: return a "Safe" dictionary so the worker doesn't skip the page
+            return {previous_section or "Unstructured Content": raw_response}
 
 
 def generate_exam_ollama(

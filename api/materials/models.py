@@ -55,3 +55,9 @@ class MaterialUploadResponse(BaseModel):
     status: str
     message: str
     material_id: int
+
+
+class SyncPendingResponse(BaseModel):
+    status: str
+    queued_count: int
+    message: str
