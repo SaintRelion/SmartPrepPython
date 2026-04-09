@@ -12,6 +12,7 @@ from .models import (
     MaterialListItem,
     SectionItem,
     GetSectionsRequest,
+    SyncPendingResponse,
 )
 from utils.db import db
 
@@ -80,17 +81,20 @@ class MaterialsController:
         )
         return [SectionItem(**r) for r in rows]
 
-    @router.post("/sync_pending_materials")
-    async def sync_pending_materials_POST():
-        pending = db.select(
+    @router.post("/sync_pending_materials", response_model=SyncPendingResponse)
+    async def sync_pending_materials_POST() -> SyncPendingResponse:
+        rows = db.select(
             "SELECT id, document_path FROM materials WHERE processed_by_ai = 0"
         )
+
+        pending = rows if rows else []
 
         for item in pending:
             process_material_task.delay(item["id"], item["document_path"])
 
-        return {
-            "status": "success",
-            "queued_count": len(pending),
-            "message": f"Re-queued {len(pending)} pending modules.",
-        }
+        # This will now be strictly validated against SyncPendingResponse
+        return SyncPendingResponse(
+            status="success",
+            queued_count=len(pending),
+            message=f"Re-queued {len(pending)} pending modules.",
+        )
