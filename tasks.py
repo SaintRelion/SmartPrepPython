@@ -16,14 +16,31 @@ app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
 @app.task(name="process_material_task")
 def process_material_task(material_id: int, file_path: str):
     print(f"\n[MATERIAL] >>> Processing ID: {material_id}")
-    db.execute("UPDATE materials SET processed_by_ai = 1 WHERE id = %s", (material_id,))
+    db.execute(
+        "UPDATE materials SET processed_by_ai=1, processing_progress=0 WHERE id = %s",
+        (material_id,),
+    )
     try:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Missing PDF: {file_path}")
         reader = PyPDF2.PdfReader(file_path)
         document_buffer = {}
         current_section = "Introduction"
+
+        total_pages = len(reader.pages)
+
         for page_num, page in enumerate(reader.pages):
+            progress_pct = int(((page_num + 1) / total_pages) * 100)
+            db.execute(
+                "UPDATE materials SET processing_progress = %s WHERE id = %s",
+                (progress_pct, material_id),
+            )
+
+            try:
+                requests.post("http://localhost:8000/notify-update", timeout=5)
+            except:
+                pass
+
             text = page.extract_text()
             if not text or len(text.strip()) < 50:
                 continue
@@ -40,14 +57,17 @@ def process_material_task(material_id: int, file_path: str):
                     else:
                         document_buffer[safe_title] = str(content)
                     current_section = safe_title
+
         for title, content in document_buffer.items():
             db.insert(
                 "INSERT INTO sections (material_id, section_name, content) VALUES (%s, %s, %s)",
                 (material_id, title, content),
             )
+
         db.execute(
             "UPDATE materials SET processed_by_ai = 2 WHERE id = %s", (material_id,)
         )
+
         print(f"[MATERIAL] <<< SUCCESS ID: {material_id}")
     except Exception as e:
         print(f"[MATERIAL] !!! FAILURE: {e}")

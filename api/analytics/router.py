@@ -1,28 +1,82 @@
 import json
 
 from api.analytics.models import (
-    PersonnelAnalyticsResponse,
+    GlobalExcellenceResponse,
+    LeaderEntry,
     PerformanceMetric,
     QuestionForensic,
     StatsRequest,
     ExamAnalyticsResponse,
-    PersonnelStat,
+    SubjectLeaderboard,
 )
 from utils.db import db
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List
+from fastapi import APIRouter
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
-def calc_avg(metrics: List[PerformanceMetric]) -> float:
-    if not metrics:
-        return 0.0
-    return sum(m.percentage for m in metrics) / len(metrics)
-
-
 class AnalyticsController:
+
+    @staticmethod
+    @router.get("/get_global_excellence", response_model=GlobalExcellenceResponse)
+    async def get_global_excellence_GET() -> GlobalExcellenceResponse:
+        sql = """
+            WITH UserMaterialStats AS (
+                SELECT 
+                    u.id as user_id, u.username,
+                    m.id as material_id, m.title_content as material_name,
+                    COUNT(er.id) as total_items,
+                    SUM(er.is_correct) as correct_items,
+                    (SUM(er.is_correct) / COUNT(er.id) * 100) as percentage
+                FROM examination_results er
+                JOIN questions q ON er.question_id = q.id
+                JOIN materials m ON q.material_id = m.id
+                JOIN users u ON er.user_id = u.id
+                WHERE er.attempt_index = (
+                    SELECT MAX(attempt_index) FROM examination_results 
+                    WHERE examination_id = er.examination_id AND user_id = er.user_id
+                )
+                GROUP BY u.id, u.username, m.id, m.title_content
+                HAVING COUNT(er.id) > 0
+            ),
+            RankedStats AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY material_id 
+                        ORDER BY percentage DESC, total_items DESC
+                    ) as `ranking_position`
+                FROM UserMaterialStats
+            )
+            SELECT * FROM RankedStats 
+            WHERE `ranking_position` <= 5  -- FETCH TOP 5
+            ORDER BY material_name ASC, `ranking_position` ASC
+        """
+
+        rows = db.select(sql)
+
+        # Group results by material
+        grouped_data = {}
+        for r in rows:
+            m_name = r["material_name"]
+            if m_name not in grouped_data:
+                grouped_data[m_name] = []
+
+            grouped_data[m_name].append(
+                LeaderEntry(
+                    rank=r["ranking_position"],
+                    student_name=r["username"],
+                    percentage=round(r["percentage"], 2),
+                    total_items=r["total_items"],
+                )
+            )
+
+        leaderboards = [
+            SubjectLeaderboard(material_name=name, top_performers=leaders)
+            for name, leaders in grouped_data.items()
+        ]
+
+        return GlobalExcellenceResponse(success=True, subject_leaderboards=leaderboards)
 
     @staticmethod
     @router.post("/get_exam_stats", response_model=ExamAnalyticsResponse)
@@ -75,71 +129,81 @@ class AnalyticsController:
         m_map = {}
         user_groups = {}
         for r in rows:
-            uid = r["user_id"]
-            mid = r["material_id"]
+            u_id = r["user_id"]
+            m_id = r["material_id"]
 
             if not req.user_id:
-                if uid not in user_groups:
-                    user_groups[uid] = {
+                # AGGREGATE MODE: Group by User
+                if u_id not in user_groups:
+                    user_groups[u_id] = {
                         "label": r["username"],
                         "s": 0,
                         "t": 0,
-                        "id": uid,
+                        "id": u_id,
                         "subjects": {},  # Tracking subjects for the "Critical Fail" filter
                     }
 
-                user_groups[uid]["t"] += 1
+                user_groups[u_id]["t"] += 1
                 if r["is_correct"]:
-                    user_groups[uid]["s"] += 1
+                    user_groups[u_id]["s"] += 1
 
                 # Track material breakdown per user internally
-                if mid not in user_groups[uid]["subjects"]:
-                    user_groups[uid]["subjects"][mid] = {"s": 0, "t": 0}
-                user_groups[uid]["subjects"][mid]["t"] += 1
-                if r["is_correct"]:
-                    user_groups[uid]["subjects"][mid]["s"] += 1
-            else:
-                if mid not in m_map:
-                    m_map[mid] = {"label": r["m_name"], "s": 0, "t": 0}
-                m_map[mid]["t"] += 1
-                if r["is_correct"]:
-                    m_map[mid]["s"] += 1
+                if m_id not in user_groups[u_id]["subjects"]:
+                    # FIX: Store the label (m_name) here so m_val["label"] works later!
+                    user_groups[u_id]["subjects"][m_id] = {
+                        "label": r["m_name"],
+                        "s": 0,
+                        "t": 0,
+                    }
 
-        final_list = []
+                user_groups[u_id]["subjects"][m_id]["t"] += 1
+                if r["is_correct"]:
+                    user_groups[u_id]["subjects"][m_id]["s"] += 1
+            else:
+                # INDIVIDUAL MODE: Group by Material
+                if m_id not in m_map:
+                    m_map[m_id] = {"label": r["m_name"], "s": 0, "t": 0}
+
+                m_map[m_id]["t"] += 1
+                if r["is_correct"]:
+                    m_map[m_id]["s"] += 1
+
+        # --- Build the Recursive PerformanceMetric List ---
+        final_metrics = []
         if not req.user_id:
-            for v in user_groups.values():
-                # Generate the material breakdown list for THIS specific user
-                m_breakdown = [
+            for u_id, v in user_groups.items():
+                # Now 'v' is the dictionary, so v["subjects"] will work!
+                u_m_breakdown = [
                     PerformanceMetric(
                         id=m_id,
-                        label="",
-                        score=m_data["s"],
-                        total=m_data["t"],
-                        percentage=(m_data["s"] / m_data["t"] * 100),
+                        label=m_val["label"],
+                        score=m_val["s"],
+                        total=m_val["t"],
+                        percentage=(m_val["s"] / m_val["t"] * 100),
                     )
-                    for m_id, m_data in v["subjects"].items()
+                    for m_id, m_val in v["subjects"].items()
                 ]
 
-                final_list.append(
+                final_metrics.append(
                     PerformanceMetric(
-                        id=v["id"],
-                        label=v["label"],
+                        id=u_id,
+                        label=v["label"],  # username
                         score=v["s"],
                         total=v["t"],
                         percentage=(v["s"] / v["t"] * 100),
-                        material_breakdown=m_breakdown,  # This is what your VB.NET filter needs!
+                        material_breakdown=u_m_breakdown,
                     )
                 )
         else:
-            final_list = [
+            final_metrics = [
                 PerformanceMetric(
-                    id=mid,
+                    id=m_id,
                     label=v["label"],
                     score=v["s"],
                     total=v["t"],
                     percentage=(v["s"] / v["t"] * 100),
                 )
-                for mid, v in m_map.items()
+                for m_id, v in m_map.items()
             ]
 
         # --- 2. Difficulty Breakdown Logic ---
@@ -163,9 +227,9 @@ class AnalyticsController:
             for k, v in d_map.items()
         ]
 
-        # --- 3. NEW: Question Logs Logic (The Forensic Micro-Data) ---
+        # --- Question Logs Logic ---
         # Only populate logs if we are looking at a specific user's detail
-        logs = []
+        question_logs = []
         if req.user_id:
             for r in rows:
                 # Perform the forensic lookup for full text
@@ -176,7 +240,7 @@ class AnalyticsController:
                     r["correct_answer"], r["choices"]
                 )
 
-                logs.append(
+                question_logs.append(
                     QuestionForensic(
                         question_text=r["question_text"],
                         student_answer=full_student_ans,
@@ -187,7 +251,7 @@ class AnalyticsController:
                 )
 
         # --- 4. Sorting & Final Response ---
-        final_list.sort(key=lambda x: x.percentage)
+        final_metrics.sort(key=lambda x: x.percentage)
         diff_order = {"Easy": 0, "Medium": 1, "Hard": 2}
         diff_list.sort(key=lambda x: diff_order.get(x.label, 99))
 
@@ -196,141 +260,7 @@ class AnalyticsController:
 
         return ExamAnalyticsResponse(
             overall_competency=overall_comp,
-            material_breakdown=final_list,
+            material_breakdown=final_metrics,
             difficulty_breakdown=diff_list,
-            question_logs=logs,  # Integrated
-        )
-
-    @router.post("/get_personnel_stats", response_model=PersonnelAnalyticsResponse)
-    async def get_personnel_stats_POST(req: StatsRequest) -> PersonnelAnalyticsResponse:
-        # 1. Fetch all Reviewees
-        users = db.select("SELECT id, username FROM users WHERE role = 'Reviewee'")
-        if not users:
-            return PersonnelAnalyticsResponse(
-                avg_proficiency=0,
-                total_active=0,
-                critical_weakness="STABLE",
-                dossiers=[],
-            )
-
-        # 2. Base Query (Global - no material_id filter needed)
-        sql = """
-            SELECT 
-                er.user_id, er.is_correct, 
-                q.material_id, m.title_content as m_name,
-                q.section_id, s.section_name as s_name
-            FROM examination_results er
-            JOIN questions q ON er.question_id = q.id
-            JOIN materials m ON q.material_id = m.id
-            LEFT JOIN sections s ON q.section_id = s.id
-            JOIN examinations e ON q.examination_id = e.id
-            WHERE 1=1
-        """
-        params = []
-
-        if req.user_id:
-            sql += " AND er.user_id = %s"
-            params.append(req.user_id)
-
-        # Keep Focus and Difficulty filters as they define the 'context' of the SWOT
-        if req.focus:
-            sql += " AND e.focus = %s"
-            params.append(req.focus)
-        if req.difficulty:
-            sql += " AND e.difficulty = %s"
-            params.append(req.difficulty)
-
-        all_rows = db.select(sql, tuple(params))
-
-        # 3. Process Dossiers
-        dossiers = []
-        global_material_fail_count = {}
-
-        for user in users:
-            u_id = user["id"]
-            u_rows = [r for r in all_rows if r["user_id"] == u_id]
-
-            m_map = {}
-            s_map = {}
-
-            for r in u_rows:
-                # Aggregate Material Stats
-                m_id, m_name = r["material_id"], r["m_name"]
-                if m_id not in m_map:
-                    m_map[m_id] = {"label": m_name, "s": 0, "t": 0}
-                m_map[m_id]["t"] += 1
-                if r["is_correct"]:
-                    m_map[m_id]["s"] += 1
-
-                # Aggregate Section Stats
-                s_id, s_name = r["section_id"], r["s_name"] or "Uncategorized"
-                if s_id not in s_map:
-                    s_map[s_id] = {"label": s_name, "s": 0, "t": 0}
-                s_map[s_id]["t"] += 1
-                if r["is_correct"]:
-                    s_map[s_id]["s"] += 1
-
-            def to_metrics(data_map):
-                metrics = [
-                    PerformanceMetric(
-                        id=k,
-                        label=v["label"],
-                        score=v["s"],
-                        total=v["t"],
-                        percentage=(v["s"] / v["t"] * 100) if v["t"] > 0 else 0,
-                    )
-                    for k, v in data_map.items()
-                ]
-                return sorted(metrics, key=lambda x: x.percentage)
-
-            m_metrics = to_metrics(m_map)
-
-            # Tracking Critical Weakness for the System-Wide KPI
-            if m_metrics:
-                weakest = m_metrics[0].label  # First because it's sorted ascending
-                global_material_fail_count[weakest] = (
-                    global_material_fail_count.get(weakest, 0) + 1
-                )
-
-            user_avg = (
-                sum(m.percentage for m in m_metrics) / len(m_metrics)
-                if m_metrics
-                else 0.0
-            )
-
-            dossiers.append(
-                PersonnelStat(
-                    user_id=u_id,
-                    username=user["username"],
-                    overall_competency=user_avg,
-                    material_breakdown=m_metrics,
-                    section_breakdown=to_metrics(s_map),
-                )
-            )
-
-        # 4. Sorting & Tactical Limit
-        # Default sort by overall competency descending (Best first)
-        dossiers.sort(key=lambda x: x.overall_competency, reverse=True)
-
-        if req.limit and req.limit != -1:
-            dossiers = dossiers[: req.limit]
-
-        # 5. Final Aggregates
-        total_active = len(dossiers)
-        global_avg = (
-            sum(d.overall_competency for d in dossiers) / total_active
-            if total_active > 0
-            else 0.0
-        )
-        crit_weakness = (
-            max(global_material_fail_count, key=global_material_fail_count.get)
-            if global_material_fail_count
-            else "STABLE"
-        )
-
-        return PersonnelAnalyticsResponse(
-            avg_proficiency=global_avg,
-            total_active=total_active,
-            critical_weakness=crit_weakness,
-            dossiers=dossiers,
+            question_logs=question_logs,
         )
