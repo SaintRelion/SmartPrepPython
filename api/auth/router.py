@@ -33,7 +33,25 @@ class AuthController:
     @staticmethod
     @router.post("/register", response_model=AuthResponse)
     async def register_POST(user: UserRegister) -> AuthResponse:
-        # Use the helper from utils
+        # 1. BD AMPL KOS: Pre-flight check for existing personnel
+        check_sql = (
+            "SELECT username, email FROM users WHERE username = %s OR email = %s"
+        )
+        existing_user = db.select(check_sql, (user.username, user.email))
+
+        if existing_user:
+            # Determine exactly which one exists to give a precise error
+            db_user = existing_user[0]
+            if db_user["username"] == user.username:
+                raise HTTPException(
+                    status_code=400, detail="CONFLICT: Username is already enlisted."
+                )
+            if db_user["email"] == user.email:
+                raise HTTPException(
+                    status_code=400, detail="CONFLICT: Email address is already in use."
+                )
+
+        # 2. Proceed with Hashing and Insertion
         hashed_pwd = hash_password(user.password)
         try:
             new_id = db.insert(
@@ -43,11 +61,17 @@ class AuthController:
                 """,
                 (user.username, hashed_pwd, user.email, user.role, "locked"),
             )
-            return AuthResponse(status="success", id=str(new_id))
+
+            # Ensure we return the full AuthResponse model to satisfy Pydantic
+            return AuthResponse(
+                status="success", id=str(new_id), email=user.email, role=user.role
+            )
+
         except Exception as e:
-            print(f"Register Error: {e}")
+            print(f"Register Database Error: {e}")
             raise HTTPException(
-                status_code=400, detail="Username or Email already exists"
+                status_code=500,
+                detail="SYSTEM ERROR: Personnel enlistment failed at the database level.",
             )
 
     @staticmethod

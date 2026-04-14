@@ -34,7 +34,16 @@ class MaterialListItem(BaseModel):
     document_path: str
     title_content: str
     processed_by_ai: int
+    processing_progress: Optional[int] = 0
     created_at: str
+
+    @field_validator("processing_progress", mode="before")
+    @classmethod
+    def handle_null_progress(cls, v):
+        # BD AMPL KOS: Forensic null handling
+        if v is None:
+            return 0
+        return v
 
     @field_validator("created_at", mode="before")
     @classmethod

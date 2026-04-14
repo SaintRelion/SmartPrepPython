@@ -53,7 +53,7 @@ class MaterialsController:
     async def get_materials_GET(
         req: GetMaterialsRequest = Depends(),
     ) -> List[MaterialListItem]:
-        query = "SELECT id, document_path, title_content, processed_by_ai, created_at FROM materials"
+        query = "SELECT id, document_path, title_content, processed_by_ai, processing_progress, created_at FROM materials"
         params = []
 
         if req.processed_by_ai >= 0:

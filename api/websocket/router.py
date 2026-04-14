@@ -16,5 +16,5 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @router.post("/notify-update")
 async def notify_update():
-    await manager.broadcast("REFRESH_MATERIALS")
+    await manager.broadcast("REFRESH_PROGRESS")
     return {"status": "success"}

@@ -42,20 +42,18 @@ class ExamAnalyticsResponse(BaseModel):
     question_logs: List[QuestionForensic]
 
 
-# STRENGTH AND WEAKNESS
+class LeaderEntry(BaseModel):
+    rank: int
+    student_name: str
+    percentage: float
+    total_items: int
 
 
-class PersonnelStat(BaseModel):
-    user_id: int
-    username: str
-    overall_competency: float
-    # Nested breakdowns for Tab 2 / Inspection
-    material_breakdown: List[PerformanceMetric]
-    section_breakdown: List[PerformanceMetric]
+class SubjectLeaderboard(BaseModel):
+    material_name: str
+    top_performers: List[LeaderEntry]
 
 
-class PersonnelAnalyticsResponse(BaseModel):
-    avg_proficiency: float
-    total_active: int
-    critical_weakness: str
-    dossiers: List[PersonnelStat]
+class GlobalExcellenceResponse(BaseModel):
+    success: bool
+    subject_leaderboards: List[SubjectLeaderboard]
