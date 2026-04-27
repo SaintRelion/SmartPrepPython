@@ -26,6 +26,19 @@ class Database:
         self.conn.commit()
         return self.cursor.rowcount
 
+    def execute_many(self, query: str, params_list: List[tuple]) -> int:
+        """
+        Executes a query against a list of parameter tuples.
+        Used for bulk inserts like allocating exam questions.
+        """
+        try:
+            self.cursor.executemany(query, params_list)
+            self.conn.commit()
+            return self.cursor.rowcount
+        except Exception as e:
+            self.conn.rollback()
+            raise e
+
     def select(self, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         self.conn.commit()
         self.cursor.execute(query, params)

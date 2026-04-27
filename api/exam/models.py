@@ -1,11 +1,15 @@
 import json
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 
 # --- REQUEST MODELS ---
+class RevieweeStatusIn(BaseModel):
+    examination_id: int
+
+
 class QuestionOut(BaseModel):
     id: int
     question_text: str
@@ -18,33 +22,9 @@ class QuestionOut(BaseModel):
         return json.loads(v) if isinstance(v, str) else v
 
 
-class AdminExamStatusOut(BaseModel):
-    id: int
-    focus: str
-    difficulty: str
-    total_items: int
-    material_config: Dict[str, int]
-    processed_by_ai: int
-    created_at: datetime
-
-    generated_count: int = 0
-    questions: List[QuestionOut] = []
-
-    @property
-    def status_label(self) -> str:
-        status_map = {0: "Pending", 1: "Processing", 2: "Completed", 3: "Error"}
-        return status_map.get(self.processed_by_ai, "Unknown")
-
-    @field_validator("material_config", mode="before")
-    @classmethod
-    def parse_json_config(cls, v: Any):
-        return json.loads(v) if isinstance(v, str) else v
-
-
 class ExamListRequest(BaseModel):
     user_id: Optional[int] = (None,)
-    focus: Optional[str] = None
-    difficulty: Optional[str] = None
+    exam_name: Optional[str] = None
 
 
 class ExamGetRequest(BaseModel):
@@ -64,13 +44,31 @@ class SubmitAnswerRequest(BaseModel):
     answers: List[AnswerIn]
 
 
+class ExamGenerationRequest(BaseModel):
+    exam_name: str
+    total_items: int
+    is_randomized: bool  # New toggle
+    questionnaires: Dict[str, int]  # { "questionnaire_id": count }
+
+
+class ExamRenameRequest(BaseModel):
+    exam_id: int
+    new_name: str
+
+
+class ExamRenameResponse(BaseModel):
+    success: bool
+    message: str
+    updated_name: Optional[str] = None
+
+
 # --- RESPONSE MODELS ---
 
 
 class ExamHistoryItem(BaseModel):
     examination_id: int
     answered_at: datetime
-    focus: str
+    exam_name: str
     total_questions: int
     correct_count: int
     score_display: str
@@ -109,42 +107,40 @@ class SubmissionSummary(BaseModel):
 class QuestionOut(BaseModel):
     id: int
     question_text: str
-    choices: Dict[str, str]
-    correct_answer: str
+    option_a: str = ""
+    option_b: str = ""
+    option_c: str = ""
+    option_d: str = ""
+    answer: str  # Maps to correct_answer in DB
 
-    @field_validator("choices", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def validate_choices(cls, v):
-        # 1. Parse JSON string if it comes from the DB as text
-        if isinstance(v, str):
-            try:
-                v = json.loads(v)
-            except (json.JSONDecodeError, TypeError):
-                return {}
+    def flatten_choices(cls, data: Any) -> Any:
+        # 1. Parse choices if it's a string
+        choices = data.get("choices")
+        if isinstance(choices, str):
+            choices = json.loads(choices)
 
-        # 2. If it's a list (e.g., ["Ans1", "Ans2"]), convert to Dict {"0": "Ans1", ...}
-        # Or use Alpha keys {"A": "Ans1", "B": "Ans2"} to match Exam UI
-        if isinstance(v, list):
-            import string
+        # 2. Map dict keys (A, B, C, D) to flat properties
+        if isinstance(choices, dict):
+            data["option_a"] = choices.get("A", "")
+            data["option_b"] = choices.get("B", "")
+            data["option_c"] = choices.get("C", "")
+            data["option_d"] = choices.get("D", "")
 
-            # Maps index to A, B, C, D...
-            return {
-                string.ascii_uppercase[i]: str(choice) for i, choice in enumerate(v)
-            }
+        # 3. Rename correct_answer to answer to match your VB model
+        if "correct_answer" in data:
+            data["answer"] = data["correct_answer"]
 
-        # 3. If it's already a dict, ensure keys/values are strings
-        if isinstance(v, dict):
-            return {str(k): str(val) for k, val in v.items()}
-
-        return {}
+        return data
 
 
 class ExamListOut(BaseModel):
     id: int
-    focus: str
-    difficulty: str
+    exam_name: str
+    category_name: str
     created_at: str
-    reviewee_count: int
+    metric_count: int
 
 
 class DailyExamListGroup(BaseModel):
@@ -154,8 +150,29 @@ class DailyExamListGroup(BaseModel):
 
 class ExamOut(BaseModel):
     id: int
-    focus: str
-    difficulty: str
+    exam_name: str
     total_items: int
     questions: List[QuestionOut]
     user_attempts: int
+
+
+class ExamGenerationResponse(BaseModel):
+    status: str
+    message: str
+    examination_id: int
+
+
+class RevieweeStatusOut(BaseModel):
+    id: int
+    username: str
+    email: str
+    has_taken: bool
+
+
+class ExamDeleteRequest(BaseModel):
+    exam_id: int
+
+
+class ExamDeleteResponse(BaseModel):
+    success: bool
+    message: str

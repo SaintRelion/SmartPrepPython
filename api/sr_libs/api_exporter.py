@@ -4,16 +4,14 @@ from typing import Dict, get_type_hints, get_origin, get_args, List, Union, Any
 
 # Controllers
 from api.auth.router import AuthController
-from api.materials.router import MaterialsController
-from api.ai.router import AIController
-from api.review.router import ReviewController
+from api.slots.router import SlotsController
+from api.exam.router import ExamController
 from api.analytics.router import AnalyticsController
 
 CONTROLLERS = {
     "Auth": AuthController,
-    "Materials": MaterialsController,
-    "AI": AIController,
-    "Review": ReviewController,
+    "Slots": SlotsController,
+    "Exam": ExamController,
     "Analytics": AnalyticsController,
 }
 
@@ -22,27 +20,32 @@ def get_type_name(t: Any) -> str:
     """Standardizes Python types to names the SR_Resolver map understands."""
     origin = get_origin(t)
 
-    # 1. Handle Dictionaries dynamically (Micro-detection)
+    # 1. Handle Dictionaries
     if origin in [dict, Dict]:
         args = get_args(t)
         if args and len(args) == 2:
             k = get_type_name(args[0])
             v = get_type_name(args[1])
-            # Pass a structured string that resolve_type will identify
             return f"Dict[{k}, {v}]"
         return "dict"
 
-    # 2. Handle Base Types
-    name = getattr(t, "__name__", str(t))
-    if "int" in name.lower():
+    # 2. Get the actual name
+    name = getattr(t, "__name__", str(t)).lower()
+
+    # FIX: Use EXACT matching for primitives so "Point" isn't caught as "int"
+    if name == "int":
         return "int"
-    if "str" in name.lower():
+    if name in ["str", "string"]:
         return "string"
-    if "float" in name.lower():
+    if name == "float":
         return "float"
-    if "bool" in name.lower():
+    if name == "bool":
         return "bool"
-    return name
+    if "datetime" in name:
+        return "datetime"
+
+    # 3. If it's a custom class (like SlotHistoryPoint), return its real name
+    return getattr(t, "__name__", "Object")
 
 
 def register_model_recursive(spec: dict, model_cls: Any):

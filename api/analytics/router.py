@@ -1,7 +1,12 @@
 import json
 
 from api.analytics.models import (
+    ComparativeTrendResponse,
+    ForensicAttemptRequest,
+    ForensicAttemptResponse,
+    ForensicLogItem,
     GlobalExcellenceResponse,
+    GrowthTrendResponse,
     LeaderEntry,
     PerformanceMetric,
     QuestionForensic,
@@ -17,250 +22,426 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 class AnalyticsController:
-
     @staticmethod
-    @router.get("/get_global_excellence", response_model=GlobalExcellenceResponse)
-    async def get_global_excellence_GET() -> GlobalExcellenceResponse:
+    @router.get("/get_leaderboard", response_model=GlobalExcellenceResponse)
+    async def get_leaderboard_GET() -> GlobalExcellenceResponse:
+        # Updated JOIN: questionnaire -> source_references
         sql = """
-            WITH UserMaterialStats AS (
+            WITH BaseStats AS (
                 SELECT 
                     u.id as user_id, u.username,
-                    m.id as material_id, m.title_content as material_name,
+                    c.id as topic_id, c.name as topic_name,
                     COUNT(er.id) as total_items,
-                    SUM(er.is_correct) as correct_items,
-                    (SUM(er.is_correct) / COUNT(er.id) * 100) as percentage
+                    SUM(er.is_correct) as correct_items
                 FROM examination_results er
-                JOIN questions q ON er.question_id = q.id
-                JOIN materials m ON q.material_id = m.id
+                JOIN questionnaire_items qi ON er.question_id = qi.id
+                JOIN source_references sr ON qi.questionnaire_id = sr.id
+                JOIN category c ON sr.category_id = c.id
                 JOIN users u ON er.user_id = u.id
+                -- Ensuring we only use the latest attempt per user per question
                 WHERE er.attempt_index = (
                     SELECT MAX(attempt_index) FROM examination_results 
-                    WHERE examination_id = er.examination_id AND user_id = er.user_id
+                    WHERE user_id = er.user_id AND question_id = er.question_id
                 )
-                GROUP BY u.id, u.username, m.id, m.title_content
-                HAVING COUNT(er.id) > 0
+                GROUP BY u.id, c.id
             ),
-            RankedStats AS (
-                SELECT *,
+            CategoryRankings AS (
+                SELECT 
+                    topic_name as group_title,
+                    username,
+                    (SUM(correct_items) * 100.0 / SUM(total_items)) as percentage,
+                    SUM(total_items) as items_count,
                     ROW_NUMBER() OVER (
-                        PARTITION BY material_id 
-                        ORDER BY percentage DESC, total_items DESC
-                    ) as `ranking_position`
-                FROM UserMaterialStats
+                        PARTITION BY topic_name 
+                        ORDER BY (SUM(correct_items) * 1.0 / SUM(total_items)) DESC
+                    ) as rank_pos
+                FROM BaseStats
+                GROUP BY topic_name, username
+            ),
+            OverallRankings AS (
+                SELECT 
+                    'OVERALL' as group_title,
+                    username,
+                    (SUM(correct_items) * 100.0 / SUM(total_items)) as percentage,
+                    SUM(total_items) as items_count,
+                    ROW_NUMBER() OVER (
+                        ORDER BY (SUM(correct_items) * 1.0 / SUM(total_items)) DESC
+                    ) as rank_pos
+                FROM BaseStats
+                GROUP BY username
             )
-            SELECT * FROM RankedStats 
-            WHERE `ranking_position` <= 5  -- FETCH TOP 5
-            ORDER BY material_name ASC, `ranking_position` ASC
+            SELECT * FROM OverallRankings WHERE rank_pos <= 10
+            UNION ALL
+            SELECT * FROM CategoryRankings WHERE rank_pos <= 5
+            ORDER BY CASE WHEN group_title = 'OVERALL' THEN 0 ELSE 1 END, group_title ASC, rank_pos ASC
         """
 
         rows = db.select(sql)
 
-        # Group results by material
         grouped_data = {}
         for r in rows:
-            m_name = r["material_name"]
-            if m_name not in grouped_data:
-                grouped_data[m_name] = []
+            title = r["group_title"]
+            if title not in grouped_data:
+                grouped_data[title] = []
 
-            grouped_data[m_name].append(
+            grouped_data[title].append(
                 LeaderEntry(
-                    rank=r["ranking_position"],
+                    rank=r["rank_pos"],
                     student_name=r["username"],
                     percentage=round(r["percentage"], 2),
-                    total_items=r["total_items"],
+                    total_items=r["items_count"],
                 )
             )
 
+        # Convert grouped dictionary into the expected SubjectLeaderboard list
         leaderboards = [
-            SubjectLeaderboard(material_name=name, top_performers=leaders)
+            SubjectLeaderboard(topic_name=name, top_performers=leaders)
             for name, leaders in grouped_data.items()
         ]
 
         return GlobalExcellenceResponse(success=True, subject_leaderboards=leaderboards)
 
-    @staticmethod
-    @router.post("/get_exam_stats", response_model=ExamAnalyticsResponse)
-    async def get_exam_stats_POST(req: StatsRequest) -> ExamAnalyticsResponse:
-        params = [req.examination_id]
+    @router.post("/get_exam_analytics", response_model=ExamAnalyticsResponse)
+    async def get_exam_analytics_POST(req: StatsRequest) -> ExamAnalyticsResponse:
+        # 1. Fetch total items for the examination context
+        exam_info = db.select(
+            "SELECT total_items FROM examinations WHERE id = %s", (req.examination_id,)
+        )
+        total_exam_items = exam_info[0]["total_items"] if exam_info else 0
 
-        user_filter = ""
+        # 2. Updated SQL Query to join through source_references
+        sql = """
+            SELECT 
+                er.is_correct,
+                er.student_answer,
+                qi.question_text,
+                qi.choices,
+                qi.correct_answer,
+                c.id as category_id,
+                c.name as category_name,
+                ia.reasoning
+            FROM examination_results er
+            INNER JOIN (
+                -- Subquery: Get the latest attempt timestamp per user in this exam
+                SELECT user_id, MAX(answered_at) as latest_time
+                FROM examination_results
+                WHERE examination_id = %s
+                GROUP BY user_id
+            ) latest_attempts ON er.user_id = latest_attempts.user_id 
+                            AND er.answered_at = latest_attempts.latest_time
+            JOIN examination_questions eq ON er.question_id = eq.questionnaire_item_id 
+                                        AND er.examination_id = eq.examination_id
+            JOIN questionnaire_items qi ON eq.questionnaire_item_id = qi.id
+            -- Unified Table Join replacement
+            JOIN source_references sr ON qi.questionnaire_id = sr.id
+            JOIN category c ON sr.category_id = c.id
+            LEFT JOIN item_analysis ia ON qi.id = ia.item_id
+            WHERE er.examination_id = %s
+        """
+
+        params = [req.examination_id, req.examination_id]
         if req.user_id:
+            sql += " AND er.user_id = %s"
+            params.append(req.user_id)
+
+        rows = db.select(sql, tuple(params))
+
+        if not rows:
+            return ExamAnalyticsResponse(
+                overall_competency=0, topic_breakdown=[], question_logs=[]
+            )
+
+        topic_map = {}
+        question_logs = []
+        total_correct = 0
+
+        for r in rows:
+            cat_id = r["category_id"]
+            is_correct = bool(r["is_correct"])
+
+            # Aggregate Topic Data
+            if cat_id not in topic_map:
+                topic_map[cat_id] = {"name": r["category_name"], "score": 0, "total": 0}
+
+            topic_map[cat_id]["total"] += 1
+            if is_correct:
+                topic_map[cat_id]["score"] += 1
+                total_correct += 1
+
+            # Build Forensic Logs if user_id is provided
+            if req.user_id:
+                choices = r["choices"]
+                if isinstance(choices, str):
+                    choices = json.loads(choices)
+
+                s_key = str(r["student_answer"]).strip().upper()
+                c_key = str(r["correct_answer"]).strip().upper()
+                norm_choices = {str(k).upper(): v for k, v in choices.items()}
+
+                analysis_dict = {}
+                if r.get("reasoning"):
+                    try:
+                        analysis_dict = json.loads(r["reasoning"])
+                    except (json.JSONDecodeError, TypeError):
+                        analysis_dict = {}
+
+                def get_ana(key):
+                    return analysis_dict.get(
+                        key, f"Analysis for Option {key} is currently unavailable."
+                    )
+
+                question_logs.append(
+                    QuestionForensic(
+                        category_id=cat_id,
+                        question_text=r["question_text"],
+                        student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
+                        correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
+                        is_correct=is_correct,
+                        option_a_analysis=get_ana("A"),
+                        option_b_analysis=get_ana("B"),
+                        option_c_analysis=get_ana("C"),
+                        option_d_analysis=get_ana("D"),
+                    )
+                )
+
+        # Finalize Performance Metrics
+        topic_breakdown = [
+            PerformanceMetric(
+                id=tid,
+                label=data["name"],
+                score=data["score"],
+                total=data["total"],
+                percentage=round((data["score"] / data["total"]) * 100, 2),
+            )
+            for tid, data in topic_map.items()
+        ]
+
+        # Overall Competency Calculation
+        if req.user_id and total_exam_items > 0:
+            overall_comp = (total_correct / total_exam_items) * 100
+        else:
+            overall_comp = (total_correct / len(rows)) * 100 if len(rows) > 0 else 0
+
+        return ExamAnalyticsResponse(
+            overall_competency=round(overall_comp, 2),
+            topic_breakdown=topic_breakdown,
+            question_logs=question_logs,
+        )
+
+    @staticmethod
+    @router.post("/get_comparative_trend", response_model=ComparativeTrendResponse)
+    async def get_comparative_trend_POST(req: StatsRequest) -> ComparativeTrendResponse:
+        params = [req.examination_id]
+        user_filter = ""
+
+        # If a user_id is provided, we only look at that student's progression.
+        # If not, we look at the entire batch's progression per take number.
+        if req.user_id and req.user_id > 0:
             user_filter = " AND user_id = %s"
             params.append(req.user_id)
 
-        # Base SQL
         sql = f"""
             SELECT 
-                er.user_id, u.username, er.is_correct, er.student_answer,
-                q.id as q_id, q.question_text, q.correct_answer, q.choices, q.material_id, 
-                m.title_content as m_name, e.difficulty
+                res.date_recorded,
+                AVG(res.accuracy) as average_accuracy,
+                COUNT(DISTINCT res.user_id) as examinee_count,
+                ROW_NUMBER() OVER (ORDER BY res.date_recorded ASC) as attempt_number
+            FROM (
+                SELECT 
+                    user_id, 
+                    DATE(answered_at) as date_recorded,
+                    (COUNT(CASE WHEN is_correct = 1 THEN 1 END) * 100.0 / COUNT(*)) as accuracy
+                FROM examination_results
+                WHERE (user_id, examination_id, attempt_index) IN (
+                    SELECT user_id, examination_id, MAX(attempt_index)
+                    FROM examination_results
+                    WHERE examination_id = %s {user_filter}
+                    GROUP BY user_id, examination_id, DATE(answered_at)
+                )
+                GROUP BY user_id, examination_id, DATE(answered_at)
+            ) res
+            GROUP BY res.date_recorded
+            ORDER BY res.date_recorded ASC
+        """
+
+        trends = db.select(sql, tuple(params))
+
+        # Format dates for the Chart Labels
+        for row in trends:
+            if row.get("date_recorded"):
+                # Format as "Jan 26"
+                row["date_recorded"] = row["date_recorded"].strftime("%b %d")
+
+        improvement_score = 0
+        status = "Stable"
+
+        if len(trends) >= 2:
+            prev = trends[-2]["average_accuracy"]
+            curr = trends[-1]["average_accuracy"]
+            improvement_score = curr - prev
+            if improvement_score > 0:
+                status = "Improving"
+            elif improvement_score < 0:
+                status = "Regressing"
+
+        return {
+            "exam_id": req.examination_id,
+            "user_id": req.user_id,
+            "trend_label": (
+                "Individual Progress" if req.user_id else "Batch Daily Performance"
+            ),
+            "current_status": status,
+            "delta": round(improvement_score, 2),
+            "history": trends,
+        }
+
+    @staticmethod
+    @router.post("/get_slot_growth_trend", response_model=GrowthTrendResponse)
+    async def get_slot_growth_trend_POST(req: StatsRequest) -> GrowthTrendResponse:
+        params = []
+        user_filter = ""
+
+        if req.user_id and req.user_id > 0:
+            user_filter = " AND er.user_id = %s"
+            params.append(req.user_id)
+
+        # We join results -> questions -> source_references (Slot)
+        sql = f"""
+            SELECT 
+                DATE(er.answered_at) as date_recorded,
+                sr.slot_name as slot_name,
+                (SUM(er.is_correct) * 100.0 / COUNT(er.id)) as accuracy,
+                COUNT(DISTINCT er.user_id) as examinee_count
             FROM examination_results er
-            JOIN questions q ON er.question_id = q.id
-            JOIN materials m ON q.material_id = m.id
-            JOIN users u ON er.user_id = u.id
-            JOIN examinations e ON er.examination_id = e.id
-            WHERE er.examination_id = %s {user_filter}
-            AND er.attempt_index = (
-                SELECT MAX(attempt_index) 
-                FROM examination_results 
-                WHERE examination_id = er.examination_id AND user_id = er.user_id
-            )
+            JOIN questionnaire_items qi ON er.question_id = qi.id
+            JOIN source_references sr ON qi.questionnaire_id = sr.id
+            WHERE 1=1 {user_filter}
+            GROUP BY DATE(er.answered_at), sr.id, sr.slot_name
+            ORDER BY DATE(er.answered_at) ASC, sr.slot_name ASC
         """
 
         rows = db.select(sql, tuple(params))
 
-        # Helper function to get full text: "A" -> "A. The Choice Text"
-        def get_full_choice_text(letter, choices_raw):
-            if not letter or not choices_raw:
-                return letter
-            try:
-                # Parse JSON if it's a string, otherwise use as dict
-                choices = (
-                    json.loads(choices_raw)
-                    if isinstance(choices_raw, str)
-                    else choices_raw
-                )
-                choice_text = choices.get(letter, "")
-                return f"{letter}. {choice_text}" if choice_text else letter
-            except:
-                return letter
+        unique_slots = sorted(list(set(r["slot_name"] for r in rows)))
 
-        # --- 1. Material/Reviewee Logic ---
-        m_map = {}
-        user_groups = {}
+        formatted_history = []
         for r in rows:
-            u_id = r["user_id"]
-            m_id = r["material_id"]
-
-            if not req.user_id:
-                # AGGREGATE MODE: Group by User
-                if u_id not in user_groups:
-                    user_groups[u_id] = {
-                        "label": r["username"],
-                        "s": 0,
-                        "t": 0,
-                        "id": u_id,
-                        "subjects": {},  # Tracking subjects for the "Critical Fail" filter
-                    }
-
-                user_groups[u_id]["t"] += 1
-                if r["is_correct"]:
-                    user_groups[u_id]["s"] += 1
-
-                # Track material breakdown per user internally
-                if m_id not in user_groups[u_id]["subjects"]:
-                    # FIX: Store the label (m_name) here so m_val["label"] works later!
-                    user_groups[u_id]["subjects"][m_id] = {
-                        "label": r["m_name"],
-                        "s": 0,
-                        "t": 0,
-                    }
-
-                user_groups[u_id]["subjects"][m_id]["t"] += 1
-                if r["is_correct"]:
-                    user_groups[u_id]["subjects"][m_id]["s"] += 1
-            else:
-                # INDIVIDUAL MODE: Group by Material
-                if m_id not in m_map:
-                    m_map[m_id] = {"label": r["m_name"], "s": 0, "t": 0}
-
-                m_map[m_id]["t"] += 1
-                if r["is_correct"]:
-                    m_map[m_id]["s"] += 1
-
-        # --- Build the Recursive PerformanceMetric List ---
-        final_metrics = []
-        if not req.user_id:
-            for u_id, v in user_groups.items():
-                # Now 'v' is the dictionary, so v["subjects"] will work!
-                u_m_breakdown = [
-                    PerformanceMetric(
-                        id=m_id,
-                        label=m_val["label"],
-                        score=m_val["s"],
-                        total=m_val["t"],
-                        percentage=(m_val["s"] / m_val["t"] * 100),
-                    )
-                    for m_id, m_val in v["subjects"].items()
-                ]
-
-                final_metrics.append(
-                    PerformanceMetric(
-                        id=u_id,
-                        label=v["label"],  # username
-                        score=v["s"],
-                        total=v["t"],
-                        percentage=(v["s"] / v["t"] * 100),
-                        material_breakdown=u_m_breakdown,
-                    )
-                )
-        else:
-            final_metrics = [
-                PerformanceMetric(
-                    id=m_id,
-                    label=v["label"],
-                    score=v["s"],
-                    total=v["t"],
-                    percentage=(v["s"] / v["t"] * 100),
-                )
-                for m_id, v in m_map.items()
-            ]
-
-        # --- 2. Difficulty Breakdown Logic ---
-        d_map = {}
-        for r in rows:
-            diff = r["difficulty"]
-            if diff not in d_map:
-                d_map[diff] = {"label": diff, "s": 0, "t": 0}
-            d_map[diff]["t"] += 1
-            if r["is_correct"]:
-                d_map[diff]["s"] += 1
-
-        diff_list = [
-            PerformanceMetric(
-                id=0,
-                label=k,
-                score=v["s"],
-                total=v["t"],
-                percentage=(v["s"] / v["t"] * 100),
+            formatted_history.append(
+                {
+                    "date_recorded": r["date_recorded"].strftime("%b %d"),
+                    "slot_name": r["slot_name"],
+                    "accuracy": float(r["accuracy"]),
+                    "examinee_count": int(r["examinee_count"]),
+                }
             )
-            for k, v in d_map.items()
-        ]
 
-        # --- Question Logs Logic ---
-        # Only populate logs if we are looking at a specific user's detail
-        question_logs = []
-        if req.user_id:
-            for r in rows:
-                # Perform the forensic lookup for full text
-                full_student_ans = get_full_choice_text(
-                    r["student_answer"], r["choices"]
+        result = {
+            "trend_label": (
+                "Topic Mastery Growth" if req.user_id else "Global Slot Performance"
+            ),
+            "unique_slots": unique_slots,
+            "history": formatted_history,
+        }
+
+        return result
+
+    @router.post("/get_attempt_forensics", response_model=ForensicAttemptResponse)
+    async def get_attempt_forensics_POST(
+        req: ForensicAttemptRequest,
+    ) -> ForensicAttemptResponse:
+        target_user_id = None if req.user_id == -1 else req.user_id
+
+        # Updated SQL: JOINS source_references instead of questionnaire
+        sql = (
+            """
+            WITH RankedAttempts AS (
+                SELECT 
+                    er.*,
+                    DENSE_RANK() OVER (PARTITION BY er.user_id ORDER BY er.answered_at ASC) as take_num
+                FROM examination_results er
+                WHERE er.examination_id = %s
+                """
+            + ("AND er.user_id = %s" if target_user_id else "")
+            + """
+            ),
+            StepAnalysis AS (
+                SELECT 
+                    ra.*,
+                    LAG(ra.student_answer) OVER (PARTITION BY ra.user_id, ra.question_id ORDER BY ra.take_num ASC) as prev_ans,
+                    LAG(ra.is_correct) OVER (PARTITION BY ra.user_id, ra.question_id ORDER BY ra.take_num ASC) as prev_cor
+                FROM RankedAttempts ra
+            )
+            SELECT 
+                qi.id as question_id, 
+                ANY_VALUE(qi.question_text) as question_text, 
+                ANY_VALUE(qi.choices) as choices, 
+                ANY_VALUE(qi.correct_answer) as correct_answer,
+                ANY_VALUE(c.id) as category_id, 
+                ANY_VALUE(c.name) as category_name, 
+                ANY_VALUE(ia.reasoning) as reasoning,
+                ANY_VALUE(sa.student_answer) as student_answer, 
+                ANY_VALUE(sa.is_correct) as is_correct,
+                ANY_VALUE(sa.prev_ans) as prev_ans, 
+                ANY_VALUE(sa.prev_cor) as prev_cor
+            FROM StepAnalysis sa
+            JOIN questionnaire_items qi ON sa.question_id = qi.id
+            -- JOIN mapping updated to source_references
+            JOIN source_references sr ON qi.questionnaire_id = sr.id
+            JOIN category c ON sr.category_id = c.id
+            LEFT JOIN item_analysis ia ON qi.id = ia.item_id
+            WHERE sa.take_num = %s
+            GROUP BY qi.id
+        """
+        )
+
+        params = [req.examination_id, req.attempt_index]
+        if target_user_id:
+            params.insert(1, target_user_id)
+
+        rows = db.select(sql, tuple(params))
+
+        comparative_items = []
+        for r in rows:
+            choices = (
+                json.loads(r["choices"])
+                if isinstance(r["choices"], str)
+                else r["choices"]
+            )
+
+            s_key = str(r["student_answer"]).strip().upper()
+            c_key = str(r["correct_answer"]).strip().upper()
+            norm_choices = {str(k).upper(): v for k, v in choices.items()}
+
+            analysis_dict = json.loads(r["reasoning"]) if r.get("reasoning") else {}
+
+            def get_ana(key):
+                return analysis_dict.get(
+                    key, f"Technical analysis for Option {key} is unavailable."
                 )
-                full_correct_ans = get_full_choice_text(
-                    r["correct_answer"], r["choices"]
-                )
 
-                question_logs.append(
-                    QuestionForensic(
-                        question_text=r["question_text"],
-                        student_answer=full_student_ans,
-                        correct_answer=full_correct_ans,
-                        is_correct=bool(r["is_correct"]),
-                        material_id=r["material_id"],
-                    )
-                )
+            p_val = r.get("prev_ans")
+            has_prev = p_val is not None
+            p_key = str(p_val).strip().upper() if has_prev else ""
 
-        # --- 4. Sorting & Final Response ---
-        final_metrics.sort(key=lambda x: x.percentage)
-        diff_order = {"Easy": 0, "Medium": 1, "Hard": 2}
-        diff_list.sort(key=lambda x: diff_order.get(x.label, 99))
+            item = ForensicLogItem(
+                category_id=r["category_id"],
+                category_name=r["category_name"],
+                question_text=r["question_text"],
+                correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
+                student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
+                is_correct=bool(r["is_correct"]),
+                previous_student_answer=(
+                    f"({p_key}) {norm_choices.get(p_key, 'N/A')}" if has_prev else ""
+                ),
+                previous_is_correct=bool(r.get("prev_cor")) if has_prev else False,
+                option_a_analysis=get_ana("A"),
+                option_b_analysis=get_ana("B"),
+                option_c_analysis=get_ana("C"),
+                option_d_analysis=get_ana("D"),
+            )
 
-        total_correct = sum(1 for r in rows if r["is_correct"])
-        overall_comp = (total_correct / len(rows) * 100) if rows else 0.0
+            comparative_items.append(item)
 
-        return ExamAnalyticsResponse(
-            overall_competency=overall_comp,
-            material_breakdown=final_metrics,
-            difficulty_breakdown=diff_list,
-            question_logs=question_logs,
+        return ForensicAttemptResponse(
+            success=True, comparative_items=comparative_items
         )
