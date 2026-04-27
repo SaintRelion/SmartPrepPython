@@ -18,11 +18,15 @@ def analyze_item_ollama(
 
     system_instruction: str = (
         f"You are an expert Criminology Professor specializing in {slot_name}. "
-        "Analyze the MCQ provided. We have provided segments from the original source material. "
+        "Analyze the MCQ provided using the provided source material segments. "
         "CRITICAL: The source material may contain 'noise' (headers, page numbers, or OCR artifacts); "
-        "ignore the noise and focus on the technical substance. "
-        f"If the context is missing, use standard principles of {slot_name} and RA 9514."
-        "\n\nTASK:\n"
+        "ignore the noise and focus only on the technical substance. "
+        f"If context is missing, use standard principles of {slot_name} and RA 9514. "
+        "\n\nGUIDELINES FOR COLLEGE STUDENTS:\n"
+        "- Keep explanations concise, clear, and direct. Avoid overly dense technical jargon.\n"
+        "- Focus on WHY a choice is correct or WHY it is a common distractor/wrong.\n"
+        "- Use a helpful 'Reviewer Tone' that simplifies complex concepts for easier memorization.\n"
+        "\nTASK:\n"
         "Return a JSON object with explanations for A, B, C, and D."
     )
 
