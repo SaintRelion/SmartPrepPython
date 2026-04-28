@@ -108,7 +108,7 @@ class ForensicAttemptResponse(BaseModel):
 
 class SlotHistoryPoint(BaseModel):
     date_recorded: str
-    slot_name: str
+    slot_name: str  # THIS IS NOW CATEGORY, the logic is now changed to category even though name is slot
     accuracy: float
     examinee_count: int
 
