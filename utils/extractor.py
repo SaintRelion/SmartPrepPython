@@ -13,20 +13,42 @@ def extract_questionnaire(slot_id: int, file_path: str):
     try:
         import PyPDF2
 
+        # 1. Extract text from PDF
         reader = PyPDF2.PdfReader(file_path)
         full_text = ""
         for page in reader.pages:
-            full_text += page.extract_text() + "\n"
+            content = page.extract_text()
+            if content:
+                full_text += content + "\n"
 
+        # 2. Parse questions using your heuristic engine
         extracted_data = heuristic_exam_extractor(full_text)
 
+        if not extracted_data:
+            print(f"[EXTRACTOR] No questions found in {file_path}")
+            return
+
+        print(f"[EXTRACTOR] Purging old analysis and items for Slot {slot_id}...")
+        db.execute(
+            """
+            DELETE FROM item_analysis 
+            WHERE item_id IN (SELECT id FROM questionnaire_items WHERE questionnaire_id = %s)
+        """,
+            (slot_id,),
+        )
+
+        # Step B: Delete old questionnaire items
+        db.execute(
+            "DELETE FROM questionnaire_items WHERE questionnaire_id = %s", (slot_id,)
+        )
+
         for item in extracted_data:
-            # CHECK: Why are items being skipped?
+            # Validate item has at least an answer and minimal choices
             if item["answer"] and len(item["choices"]) >= 2:
                 db.execute(
                     """INSERT INTO questionnaire_items 
-                       (questionnaire_id, question_text, choices, correct_answer) 
-                       VALUES (%s, %s, %s, %s)""",
+                       (questionnaire_id, question_text, choices, correct_answer, analysis_status) 
+                       VALUES (%s, %s, %s, %s, 'pending')""",
                     (
                         slot_id,
                         item["question_text"],
@@ -37,19 +59,20 @@ def extract_questionnaire(slot_id: int, file_path: str):
                 saved_count += 1
             else:
                 skipped_count += 1
-                # Solo Dev Tip: Print the faulty question text to see why regex failed
                 print(
                     f"[DEBUG] Skipping item: {item['question_text'][:50]}... "
-                    f"Reason: Answer={item['answer']}, Choices={item['choices']}"
+                    f"Reason: Answer={item['answer']}, ChoicesCount={len(item['choices'])}"
                 )
 
+        # 4. Update status on the source reference
         db.execute(
             "UPDATE source_references SET is_questionnaire_extracted = 1 WHERE id = %s",
             (slot_id,),
         )
 
         print(
-            f"[EXTRACTOR] Total: {len(extracted_data)} | Saved: {saved_count} | Skipped: {skipped_count}"
+            f"[EXTRACTOR] Slot {slot_id} sync complete. "
+            f"Total: {len(extracted_data)} | Saved: {saved_count} | Skipped: {skipped_count}"
         )
 
     except Exception as e:
