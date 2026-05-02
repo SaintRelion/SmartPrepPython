@@ -187,7 +187,7 @@ class ExamController:
                 id=r["id"],
                 exam_name=r["exam_name"],
                 category_name=r["category_name"],
-                created_at=r["created_at"].strftime("%H:%M"),
+                created_at=r["created_at"].strftime("%I:%M %p"),
                 metric_count=r["calculated_metric"],
             )
             date_key = r["session_date"].strftime("%B %d, %Y")
