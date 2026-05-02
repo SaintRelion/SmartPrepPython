@@ -101,10 +101,6 @@ class ExamController:
         if not exists:
             raise HTTPException(status_code=404, detail="Exam not found")
 
-        # Depending on your DB constraints, you might need to delete
-        # from examination_questions and examination_results first
-        # if ON DELETE CASCADE is not set.
-
         try:
             # Delete associated questions first
             db.execute(
@@ -217,23 +213,29 @@ class ExamController:
         # We JOIN questionnaire_items (qi) and examination_questions (eq)
         # We ORDER BY eq.id ASC to preserve the generated sequence (Randomized or Sequential)
         q_sql = """
-            SELECT 
+                SELECT 
                 qi.id, 
                 qi.question_text, 
                 qi.choices, 
-                qi.correct_answer 
+                qi.correct_answer,
+                sr.slot_name
             FROM questionnaire_items qi
             INNER JOIN examination_questions eq ON qi.id = eq.questionnaire_item_id
+            INNER JOIN source_references sr ON qi.questionnaire_id = sr.id
             WHERE eq.examination_id = %s
             ORDER BY eq.id ASC
         """
         q_rows = db.select(q_sql, (req.exam_id,))
 
-        # 4. Handle JSON Parsing and Model Validation
         import json
 
         questions = []
+        unique_topics = set()
+
         for q in q_rows:
+            if q.get("slot_name"):
+                unique_topics.add(q["slot_name"])
+
             # Ensure choices are converted from string to Dict if necessary
             if isinstance(q["choices"], str):
                 q["choices"] = json.loads(q["choices"])
@@ -246,6 +248,7 @@ class ExamController:
             total_items=exam["total_items"],
             questions=questions,
             user_attempts=user_attempts,
+            topics=sorted(list(unique_topics)),
         )
 
     @staticmethod
