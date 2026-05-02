@@ -132,60 +132,61 @@ class ExamController:
         req: ExamListRequest = Depends(),
     ) -> List[DailyExamListGroup]:
         params = []
+        sql = """
+            SELECT 
+                e.id, 
+                e.exam_name, 
+                e.created_at,
+                DATE(e.created_at) as session_date,
+                -- Pre-format time in SQL to reduce Python loop overhead
+                DATE_FORMAT(e.created_at, '%%h:%%i %%p') as time_label,
+                -- Pull category names directly through the results linkage
+                GROUP_CONCAT(DISTINCT c.name SEPARATOR ' / ') as category_names,
+                -- Metric: User's attempt count OR total distinct examinees
+                CASE 
+                    WHEN %s > 0 THEN COALESCE(ea.attempts, 0)
+                    ELSE (SELECT COUNT(DISTINCT user_id) FROM examination_attempts WHERE examination_id = e.id)
+                END as calculated_metric
+            FROM examinations e
+            LEFT JOIN examination_attempts ea ON e.id = ea.examination_id AND ea.user_id = %s
+            LEFT JOIN examination_questions eq ON e.id = eq.examination_id
+            LEFT JOIN questionnaire_items qi ON eq.questionnaire_item_id = qi.id
+            LEFT JOIN source_references sr ON qi.questionnaire_id = sr.id
+            LEFT JOIN category c ON sr.category_id = c.id
+        """
+
         current_uid = req.user_id if req.user_id is not None else -1
         params.extend([current_uid, current_uid])
 
-        sql = """
-                SELECT 
-                    e.id, 
-                    e.exam_name, 
-                    e.created_at,
-                    -- Combine all unique category names into one string
-                    GROUP_CONCAT(DISTINCT c.name SEPARATOR ' / ') as category_name,
-                    DATE(e.created_at) as session_date,
-                    CASE 
-                        WHEN %s > 0 THEN (
-                            SELECT COALESCE(MAX(attempt_index), 0) 
-                            FROM examination_results 
-                            WHERE examination_id = e.id AND user_id = %s
-                        )
-                        ELSE COUNT(DISTINCT er.user_id)
-                    END as calculated_metric
-                FROM examinations e
-                LEFT JOIN examination_results er ON e.id = er.examination_id
-                -- Expand the JSON array into rows
-                CROSS JOIN JSON_TABLE(
-                    JSON_KEYS(e.questionnaire_config),
-                    "$[*]" COLUMNS(sr_id INT PATH "$")
-                ) as jt
-                JOIN source_references sr ON sr.id = jt.sr_id
-                JOIN category c ON sr.category_id = c.id
-                WHERE 1=1
-            """
-
+        where_clauses = []
         if req.user_id and req.user_id >= 0:
-            sql += " AND e.id IN (SELECT examination_id FROM examination_results WHERE user_id = %s)"
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM examination_attempts WHERE examination_id = e.id AND user_id = %s)"
+            )
             params.append(req.user_id)
 
-        if req.exam_name and req.exam_name.strip() != "":
-            sql += " AND e.exam_name LIKE %s"
+        if req.exam_name and req.exam_name.strip():
+            where_clauses.append("e.exam_name LIKE %s")
             params.append(f"%{req.exam_name}%")
 
-        # CRITICAL: Group by ID to ensure one row per exam
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+
         sql += " GROUP BY e.id ORDER BY e.created_at DESC"
 
         rows = db.select(sql, tuple(params))
 
-        # 4. Group by Date using your original formatting
+        # 2. Optimized Grouping
         grouped_data = defaultdict(list)
         for r in rows:
             exam_item = ExamListOut(
                 id=r["id"],
                 exam_name=r["exam_name"],
-                category_name=r["category_name"],
-                created_at=r["created_at"].strftime("%I:%M %p"),
+                category_name=r["category_names"] or "General",
+                created_at=r["time_label"],  # Used pre-formatted SQL time
                 metric_count=r["calculated_metric"],
             )
+            # Group by formatted date string
             date_key = r["session_date"].strftime("%B %d, %Y")
             grouped_data[date_key].append(exam_item)
 
