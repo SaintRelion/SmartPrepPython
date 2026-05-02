@@ -29,6 +29,26 @@ class SlotsController:
             status="success", message="Category created", id=str(cat_id)
         )
 
+    @router.post("/delete_category", response_model=GenericResponse)
+    async def delete_category_POST(req: GetByCategoryIdRequest):
+        # 1. Check if category has existing slots
+        count = db.fetchone(
+            "SELECT COUNT(*) as total FROM source_references WHERE category_id = %s",
+            (req.category_id,),
+        )
+
+        if count and count["total"] > 0:
+            return GenericResponse(
+                status="error",
+                message="Cannot delete: This category still contains active topic slots.",
+            )
+
+        # 2. Proceed with deletion
+        db.execute("DELETE FROM category WHERE id = %s", (req.category_id,))
+        return GenericResponse(
+            status="success", message="Category deleted successfully"
+        )
+
     @router.get("/get_categories", response_model=List[CategoryItem])
     async def get_categories_GET() -> List[CategoryItem]:
         sql = "SELECT id, name FROM category ORDER BY name ASC"
