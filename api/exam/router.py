@@ -131,62 +131,60 @@ class ExamController:
     async def list_exams_GET(
         req: ExamListRequest = Depends(),
     ) -> List[DailyExamListGroup]:
-        params = []
+        current_uid = req.user_id if req.user_id is not None else -1
+
+        # We use JSON_TABLE to turn your config keys into a joinable list of IDs
         sql = """
             SELECT 
                 e.id, 
                 e.exam_name, 
                 e.created_at,
                 DATE(e.created_at) as session_date,
-                -- Pre-format time in SQL to reduce Python loop overhead
-                DATE_FORMAT(e.created_at, '%%h:%%i %%p') as time_label,
-                -- Pull category names directly through the results linkage
-                GROUP_CONCAT(DISTINCT c.name SEPARATOR ' / ') as category_names,
-                -- Metric: User's attempt count OR total distinct examinees
+                -- Pulling raw time; we'll format in Python to avoid the '%%' string bug
+                (
+                    SELECT GROUP_CONCAT(DISTINCT c.name SEPARATOR ' / ')
+                    FROM JSON_TABLE(JSON_KEYS(e.questionnaire_config), '$[*]' COLUMNS(sr_id INT PATH '$')) jt
+                    JOIN source_references sr ON sr.id = jt.sr_id
+                    JOIN category c ON sr.category_id = c.id
+                ) as category_names,
                 CASE 
-                    WHEN %s > 0 THEN COALESCE(ea.attempts, 0)
+                    WHEN %s > 0 THEN (
+                        SELECT COALESCE(attempts, 0) 
+                        FROM examination_attempts 
+                        WHERE examination_id = e.id AND user_id = %s
+                    )
                     ELSE (SELECT COUNT(DISTINCT user_id) FROM examination_attempts WHERE examination_id = e.id)
                 END as calculated_metric
             FROM examinations e
-            LEFT JOIN examination_attempts ea ON e.id = ea.examination_id AND ea.user_id = %s
-            LEFT JOIN examination_questions eq ON e.id = eq.examination_id
-            LEFT JOIN questionnaire_items qi ON eq.questionnaire_item_id = qi.id
-            LEFT JOIN source_references sr ON qi.questionnaire_id = sr.id
-            LEFT JOIN category c ON sr.category_id = c.id
+            WHERE 1=1
         """
+        params = [current_uid, current_uid]
 
-        current_uid = req.user_id if req.user_id is not None else -1
-        params.extend([current_uid, current_uid])
-
-        where_clauses = []
         if req.user_id and req.user_id >= 0:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM examination_attempts WHERE examination_id = e.id AND user_id = %s)"
-            )
+            sql += " AND EXISTS (SELECT 1 FROM examination_attempts WHERE examination_id = e.id AND user_id = %s)"
             params.append(req.user_id)
 
         if req.exam_name and req.exam_name.strip():
-            where_clauses.append("e.exam_name LIKE %s")
+            sql += " AND e.exam_name LIKE %s"
             params.append(f"%{req.exam_name}%")
 
-        if where_clauses:
-            sql += " WHERE " + " AND ".join(where_clauses)
-
-        sql += " GROUP BY e.id ORDER BY e.created_at DESC"
+        sql += " ORDER BY e.created_at DESC"
 
         rows = db.select(sql, tuple(params))
 
-        # 2. Optimized Grouping
         grouped_data = defaultdict(list)
         for r in rows:
+            # FORMAT TIME HERE: This bypasses the MySQL/Python '%%' escaping hell
+            time_label = r["created_at"].strftime("%I:%M %p") if r["created_at"] else ""
+
             exam_item = ExamListOut(
                 id=r["id"],
                 exam_name=r["exam_name"],
                 category_name=r["category_names"] or "General",
-                created_at=r["time_label"],  # Used pre-formatted SQL time
+                created_at=time_label,
                 metric_count=r["calculated_metric"],
             )
-            # Group by formatted date string
+
             date_key = r["session_date"].strftime("%B %d, %Y")
             grouped_data[date_key].append(exam_item)
 
