@@ -19,14 +19,20 @@ class StatsRequest(BaseModel):
     limit: Optional[int] = None
 
 
+class SlotMetric(BaseModel):
+    slot_name: str
+    score: int
+    total: int
+    percentage: float
+
+
 class PerformanceMetric(BaseModel):
     id: int  # category_id
     label: str  # category_name
     score: int
     total: int
     percentage: float
-    # Nesting allowed for sub-topics (questionnaires) if needed later
-    topic_breakdown: Optional[List["PerformanceMetric"]] = None
+    slots: List[SlotMetric]
 
 
 PerformanceMetric.model_rebuild()

@@ -10,6 +10,7 @@ from api.analytics.models import (
     LeaderEntry,
     PerformanceMetric,
     QuestionForensic,
+    SlotMetric,
     StatsRequest,
     ExamAnalyticsResponse,
     SubjectLeaderboard,
@@ -101,6 +102,7 @@ class AnalyticsController:
 
         return GlobalExcellenceResponse(success=True, subject_leaderboards=leaderboards)
 
+    # python
     @router.post("/get_exam_analytics", response_model=ExamAnalyticsResponse)
     async def get_exam_analytics_POST(req: StatsRequest) -> ExamAnalyticsResponse:
         # 1. Fetch total items for the examination context
@@ -109,7 +111,7 @@ class AnalyticsController:
         )
         total_exam_items = exam_info[0]["total_items"] if exam_info else 0
 
-        # 2. Updated SQL Query to join through source_references
+        # 2. SQL Query joined through source_references using your specific column name
         sql = """
             SELECT 
                 er.is_correct,
@@ -119,10 +121,10 @@ class AnalyticsController:
                 qi.correct_answer,
                 c.id as category_id,
                 c.name as category_name,
+                sr.slot_name as slot_name,
                 ia.reasoning
             FROM examination_results er
             INNER JOIN (
-                -- Subquery: Get the latest attempt timestamp per user in this exam
                 SELECT user_id, MAX(answered_at) as latest_time
                 FROM examination_results
                 WHERE examination_id = %s
@@ -132,7 +134,7 @@ class AnalyticsController:
             JOIN examination_questions eq ON er.question_id = eq.questionnaire_item_id 
                                         AND er.examination_id = eq.examination_id
             JOIN questionnaire_items qi ON eq.questionnaire_item_id = qi.id
-            -- Unified Table Join replacement
+            -- CRITICAL FIX: Linking questionnaire_id to source_references.id
             JOIN source_references sr ON qi.questionnaire_id = sr.id
             JOIN category c ON sr.category_id = c.id
             LEFT JOIN item_analysis ia ON qi.id = ia.item_id
@@ -157,23 +159,33 @@ class AnalyticsController:
 
         for r in rows:
             cat_id = r["category_id"]
+            slot_name = r["slot_name"]
             is_correct = bool(r["is_correct"])
 
-            # Aggregate Topic Data
             if cat_id not in topic_map:
-                topic_map[cat_id] = {"name": r["category_name"], "score": 0, "total": 0}
+                topic_map[cat_id] = {
+                    "name": r["category_name"],
+                    "score": 0,
+                    "total": 0,
+                    "slots": {},
+                }
+
+            if slot_name not in topic_map[cat_id]["slots"]:
+                topic_map[cat_id]["slots"][slot_name] = {"score": 0, "total": 0}
 
             topic_map[cat_id]["total"] += 1
+            topic_map[cat_id]["slots"][slot_name]["total"] += 1
+
             if is_correct:
                 topic_map[cat_id]["score"] += 1
-                total_correct += 1
+                topic_map[cat_id]["slots"][slot_name]["score"] += 1
+                total_correct += 1  # Track total correct for overall competency
 
-            # Build Forensic Logs if user_id is provided
             if req.user_id:
+                # Choice normalization and Forensic Logic...
                 choices = r["choices"]
                 if isinstance(choices, str):
                     choices = json.loads(choices)
-
                 s_key = str(r["student_answer"]).strip().upper()
                 c_key = str(r["correct_answer"]).strip().upper()
                 norm_choices = {str(k).upper(): v for k, v in choices.items()}
@@ -182,13 +194,8 @@ class AnalyticsController:
                 if r.get("reasoning"):
                     try:
                         analysis_dict = json.loads(r["reasoning"])
-                    except (json.JSONDecodeError, TypeError):
+                    except:
                         analysis_dict = {}
-
-                def get_ana(key):
-                    return analysis_dict.get(
-                        key, f"Analysis for Option {key} is currently unavailable."
-                    )
 
                 question_logs.append(
                     QuestionForensic(
@@ -197,12 +204,14 @@ class AnalyticsController:
                         student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
                         correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
                         is_correct=is_correct,
-                        option_a_analysis=get_ana("A"),
-                        option_b_analysis=get_ana("B"),
-                        option_c_analysis=get_ana("C"),
-                        option_d_analysis=get_ana("D"),
+                        option_a_analysis=analysis_dict.get("A", "N/A"),
+                        option_b_analysis=analysis_dict.get("B", "N/A"),
+                        option_c_analysis=analysis_dict.get("C", "N/A"),
+                        option_d_analysis=analysis_dict.get("D", "N/A"),
                     )
                 )
+
+        print(topic_map)
 
         # Finalize Performance Metrics
         topic_breakdown = [
@@ -212,15 +221,23 @@ class AnalyticsController:
                 score=data["score"],
                 total=data["total"],
                 percentage=round((data["score"] / data["total"]) * 100, 2),
+                slots=[
+                    SlotMetric(
+                        slot_name=sname,
+                        score=sdata["score"],
+                        total=sdata["total"],
+                        percentage=round((sdata["score"] / sdata["total"]) * 100, 2),
+                    )
+                    for sname, sdata in data["slots"].items()
+                ],
             )
             for tid, data in topic_map.items()
         ]
 
-        # Overall Competency Calculation
-        if req.user_id and total_exam_items > 0:
-            overall_comp = (total_correct / total_exam_items) * 100
-        else:
-            overall_comp = (total_correct / len(rows)) * 100 if len(rows) > 0 else 0
+        # Calculate overall competency based on the full exam items
+        overall_comp = (
+            (total_correct / total_exam_items) * 100 if total_exam_items > 0 else 0
+        )
 
         return ExamAnalyticsResponse(
             overall_competency=round(overall_comp, 2),
@@ -295,6 +312,7 @@ class AnalyticsController:
             "history": trends,
         }
 
+    # Though 'slot' but this is grouped by category, didnt bother remaining
     @staticmethod
     @router.post("/get_slot_growth_trend", response_model=GrowthTrendResponse)
     async def get_slot_growth_trend_POST(req: StatsRequest) -> GrowthTrendResponse:
