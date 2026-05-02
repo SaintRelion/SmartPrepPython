@@ -21,16 +21,16 @@ class StatsRequest(BaseModel):
 
 class SlotMetric(BaseModel):
     slot_name: str
-    score: int
-    total: int
+    score: float
+    total: float
     percentage: float
 
 
 class PerformanceMetric(BaseModel):
     id: int  # category_id
     label: str  # category_name
-    score: int
-    total: int
+    score: float
+    total: float
     percentage: float
     slots: List[SlotMetric]
 
@@ -38,23 +38,9 @@ class PerformanceMetric(BaseModel):
 PerformanceMetric.model_rebuild()
 
 
-class QuestionForensic(BaseModel):
-    category_id: int
-    question_text: str
-    student_answer: str
-    correct_answer: str
-    is_correct: bool
-
-    option_a_analysis: str = ""
-    option_b_analysis: str = ""
-    option_c_analysis: str = ""
-    option_d_analysis: str = ""
-
-
 class ExamAnalyticsResponse(BaseModel):
     overall_competency: float
     topic_breakdown: List[PerformanceMetric]
-    question_logs: List[QuestionForensic]
 
 
 class LeaderEntry(BaseModel):
@@ -93,6 +79,7 @@ class ComparativeTrendResponse(BaseModel):
 class ForensicLogItem(BaseModel):
     category_id: int
     category_name: str
+    slot_name: str
     question_text: str
     correct_answer: str
     student_answer: str

@@ -66,6 +66,7 @@ class SourceReferenceItem(BaseModel):
     is_material_uploaded: bool = False
     is_questionnaire_extracted: bool = False
     item_count: int = 0
+    active_exam_count: int = 0
     created_at: Optional[str] = None
 
     @field_validator("created_at", mode="before")

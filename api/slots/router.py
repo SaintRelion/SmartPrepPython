@@ -60,11 +60,17 @@ class SlotsController:
     ) -> List[SourceReferenceItem]:
         query = """
             SELECT 
-                s.*, 
-                (SELECT COUNT(*) FROM questionnaire_items WHERE questionnaire_id = s.id) as item_count
-            FROM source_references s
-            WHERE s.category_id = %s
-            ORDER BY s.created_at DESC
+            s.*, 
+            (SELECT COUNT(*) FROM questionnaire_items WHERE questionnaire_id = s.id) as item_count,
+            (
+                SELECT COUNT(DISTINCT eq.examination_id) 
+                FROM examination_questions eq
+                JOIN questionnaire_items qi ON eq.questionnaire_item_id = qi.id
+                WHERE qi.questionnaire_id = s.id
+            ) as active_exam_count
+        FROM source_references s
+        WHERE s.category_id = %s
+        ORDER BY s.created_at DESC
         """
         result = db.select(query, (int(req.category_id),))
         return result

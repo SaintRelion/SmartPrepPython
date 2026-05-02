@@ -154,6 +154,7 @@ class ExamOut(BaseModel):
     total_items: int
     questions: List[QuestionOut]
     user_attempts: int
+    topics: List[str]
 
 
 class ExamGenerationResponse(BaseModel):

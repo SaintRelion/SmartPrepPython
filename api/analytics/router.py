@@ -9,7 +9,6 @@ from api.analytics.models import (
     GrowthTrendResponse,
     LeaderEntry,
     PerformanceMetric,
-    QuestionForensic,
     SlotMetric,
     StatsRequest,
     ExamAnalyticsResponse,
@@ -26,50 +25,48 @@ class AnalyticsController:
     @staticmethod
     @router.get("/get_leaderboard", response_model=GlobalExcellenceResponse)
     async def get_leaderboard_GET() -> GlobalExcellenceResponse:
-        # Updated JOIN: questionnaire -> source_references
         sql = """
-            WITH BaseStats AS (
+            WITH UserTopicStats AS (
                 SELECT 
-                    u.id as user_id, u.username,
-                    c.id as topic_id, c.name as topic_name,
-                    COUNT(er.id) as total_items,
-                    SUM(er.is_correct) as correct_items
+                    u.username,
+                    c.name as topic_name,
+                    SUM(CAST(er.is_correct AS UNSIGNED)) as correct_count,
+                    COUNT(er.id) as total_count
                 FROM examination_results er
+                JOIN examination_attempts ea ON er.user_id = ea.user_id 
+                    AND er.examination_id = ea.examination_id 
+                    AND er.attempt_index = ea.attempts -- Direct filter for latest attempts
                 JOIN questionnaire_items qi ON er.question_id = qi.id
                 JOIN source_references sr ON qi.questionnaire_id = sr.id
                 JOIN category c ON sr.category_id = c.id
                 JOIN users u ON er.user_id = u.id
-                -- Ensuring we only use the latest attempt per user per question
-                WHERE er.attempt_index = (
-                    SELECT MAX(attempt_index) FROM examination_results 
-                    WHERE user_id = er.user_id AND question_id = er.question_id
-                )
                 GROUP BY u.id, c.id
             ),
             CategoryRankings AS (
                 SELECT 
                     topic_name as group_title,
                     username,
-                    (SUM(correct_items) * 100.0 / SUM(total_items)) as percentage,
-                    SUM(total_items) as items_count,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY topic_name 
-                        ORDER BY (SUM(correct_items) * 1.0 / SUM(total_items)) DESC
-                    ) as rank_pos
-                FROM BaseStats
-                GROUP BY topic_name, username
+                    total_count as items_count,
+                    (correct_count * 100.0 / total_count) as percentage,
+                    ROW_NUMBER() OVER (PARTITION BY topic_name ORDER BY (correct_count / total_count) DESC) as rank_pos
+                FROM UserTopicStats
+            ),
+            OverallStats AS (
+                SELECT 
+                    username,
+                    SUM(correct_count) as total_correct,
+                    SUM(total_count) as total_items
+                FROM UserTopicStats
+                GROUP BY username
             ),
             OverallRankings AS (
                 SELECT 
                     'OVERALL' as group_title,
                     username,
-                    (SUM(correct_items) * 100.0 / SUM(total_items)) as percentage,
-                    SUM(total_items) as items_count,
-                    ROW_NUMBER() OVER (
-                        ORDER BY (SUM(correct_items) * 1.0 / SUM(total_items)) DESC
-                    ) as rank_pos
-                FROM BaseStats
-                GROUP BY username
+                    total_items as items_count,
+                    (total_correct * 100.0 / total_items) as percentage,
+                    ROW_NUMBER() OVER (ORDER BY (total_correct / total_items) DESC) as rank_pos
+                FROM OverallStats
             )
             SELECT * FROM OverallRankings WHERE rank_pos <= 10
             UNION ALL
@@ -78,7 +75,11 @@ class AnalyticsController:
         """
 
         rows = db.select(sql)
+        if not rows:
+            return GlobalExcellenceResponse(success=True, subject_leaderboards=[])
 
+        # 2. Lean Grouping Logic
+        # We use a dictionary to group performers by their group_title (Subject or OVERALL)
         grouped_data = {}
         for r in rows:
             title = r["group_title"]
@@ -89,160 +90,124 @@ class AnalyticsController:
                 LeaderEntry(
                     rank=r["rank_pos"],
                     student_name=r["username"],
-                    percentage=round(r["percentage"], 2),
-                    total_items=r["items_count"],
+                    percentage=round(
+                        float(r["percentage"]), 2
+                    ),  # Cast to float to avoid Decimal errors
+                    total_items=int(r["items_count"]),
                 )
             )
 
-        # Convert grouped dictionary into the expected SubjectLeaderboard list
-        leaderboards = [
-            SubjectLeaderboard(topic_name=name, top_performers=leaders)
-            for name, leaders in grouped_data.items()
-        ]
+        # Convert to the final response model list
+        return GlobalExcellenceResponse(
+            success=True,
+            subject_leaderboards=[
+                SubjectLeaderboard(topic_name=name, top_performers=leaders)
+                for name, leaders in grouped_data.items()
+            ],
+        )
 
-        return GlobalExcellenceResponse(success=True, subject_leaderboards=leaderboards)
-
-    # python
     @router.post("/get_exam_analytics", response_model=ExamAnalyticsResponse)
     async def get_exam_analytics_POST(req: StatsRequest) -> ExamAnalyticsResponse:
-        # 1. Fetch total items for the examination context
-        exam_info = db.select(
-            "SELECT total_items FROM examinations WHERE id = %s", (req.examination_id,)
-        )
-        total_exam_items = exam_info[0]["total_items"] if exam_info else 0
+        meta_sql = """
+            SELECT 
+                (SELECT total_items FROM examinations WHERE id = %s) as total_items,
+                (SELECT COUNT(DISTINCT user_id) FROM examination_results WHERE examination_id = %s) as user_count
+        """
+        meta = db.select(meta_sql, (req.examination_id, req.examination_id))[0]
 
-        # 2. SQL Query joined through source_references using your specific column name
+        official_total_items = float(meta["total_items"] or 0)
+        user_count = float(meta["user_count"] if not req.user_id else 1)
+        div = user_count if user_count > 0 else 1.0
+
+        # 2. SQL Aggregation: Use examination_questions for the Denominator
         sql = """
             SELECT 
-                er.is_correct,
-                er.student_answer,
-                qi.question_text,
-                qi.choices,
-                qi.correct_answer,
                 c.id as category_id,
                 c.name as category_name,
-                sr.slot_name as slot_name,
-                ia.reasoning
+                sr.slot_name,
+                SUM(CAST(er.is_correct AS UNSIGNED)) as total_correct_in_batch,
+                (
+                    SELECT COUNT(*) 
+                    FROM examination_questions eq2
+                    JOIN questionnaire_items qi2 ON eq2.questionnaire_item_id = qi2.id
+                    WHERE eq2.examination_id = %s AND qi2.questionnaire_id = sr.id
+                ) as exam_slot_total
             FROM examination_results er
-            INNER JOIN (
-                SELECT user_id, MAX(answered_at) as latest_time
-                FROM examination_results
-                WHERE examination_id = %s
-                GROUP BY user_id
-            ) latest_attempts ON er.user_id = latest_attempts.user_id 
-                            AND er.answered_at = latest_attempts.latest_time
-            JOIN examination_questions eq ON er.question_id = eq.questionnaire_item_id 
-                                        AND er.examination_id = eq.examination_id
-            JOIN questionnaire_items qi ON eq.questionnaire_item_id = qi.id
-            -- CRITICAL FIX: Linking questionnaire_id to source_references.id
+            JOIN examination_attempts ea ON er.examination_id = ea.examination_id 
+                AND er.user_id = ea.user_id 
+                AND er.attempt_index = ea.attempts 
+            JOIN questionnaire_items qi ON er.question_id = qi.id
             JOIN source_references sr ON qi.questionnaire_id = sr.id
             JOIN category c ON sr.category_id = c.id
-            LEFT JOIN item_analysis ia ON qi.id = ia.item_id
             WHERE er.examination_id = %s
         """
 
+        # We pass the exam_id twice: once for the subquery denominator, once for the results
         params = [req.examination_id, req.examination_id]
         if req.user_id:
             sql += " AND er.user_id = %s"
             params.append(req.user_id)
 
+        sql += " GROUP BY c.id, sr.id"
         rows = db.select(sql, tuple(params))
 
-        if not rows:
-            return ExamAnalyticsResponse(
-                overall_competency=0, topic_breakdown=[], question_logs=[]
-            )
-
         topic_map = {}
-        question_logs = []
-        total_correct = 0
+        running_avg_numerator = 0.0
 
         for r in rows:
-            cat_id = r["category_id"]
-            slot_name = r["slot_name"]
-            is_correct = bool(r["is_correct"])
-
-            if cat_id not in topic_map:
-                topic_map[cat_id] = {
+            tid = r["category_id"]
+            if tid not in topic_map:
+                topic_map[tid] = {
                     "name": r["category_name"],
-                    "score": 0,
-                    "total": 0,
-                    "slots": {},
+                    "score": 0.0,
+                    "total": 0.0,
+                    "slots": [],
                 }
 
-            if slot_name not in topic_map[cat_id]["slots"]:
-                topic_map[cat_id]["slots"][slot_name] = {"score": 0, "total": 0}
+            # DENOMINATOR: Only items assigned to THIS exam
+            slot_total = float(r["exam_slot_total"] or 0)
 
-            topic_map[cat_id]["total"] += 1
-            topic_map[cat_id]["slots"][slot_name]["total"] += 1
+            # NUMERATOR: Average score (Batch Sum / User Count)
+            avg_score = float(r["total_correct_in_batch"]) / div
+            running_avg_numerator += avg_score
 
-            if is_correct:
-                topic_map[cat_id]["score"] += 1
-                topic_map[cat_id]["slots"][slot_name]["score"] += 1
-                total_correct += 1  # Track total correct for overall competency
+            s_perc = round((avg_score / slot_total) * 100, 2) if slot_total > 0 else 0
 
-            if req.user_id:
-                # Choice normalization and Forensic Logic...
-                choices = r["choices"]
-                if isinstance(choices, str):
-                    choices = json.loads(choices)
-                s_key = str(r["student_answer"]).strip().upper()
-                c_key = str(r["correct_answer"]).strip().upper()
-                norm_choices = {str(k).upper(): v for k, v in choices.items()}
-
-                analysis_dict = {}
-                if r.get("reasoning"):
-                    try:
-                        analysis_dict = json.loads(r["reasoning"])
-                    except:
-                        analysis_dict = {}
-
-                question_logs.append(
-                    QuestionForensic(
-                        category_id=cat_id,
-                        question_text=r["question_text"],
-                        student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
-                        correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
-                        is_correct=is_correct,
-                        option_a_analysis=analysis_dict.get("A", "N/A"),
-                        option_b_analysis=analysis_dict.get("B", "N/A"),
-                        option_c_analysis=analysis_dict.get("C", "N/A"),
-                        option_d_analysis=analysis_dict.get("D", "N/A"),
-                    )
+            topic_map[tid]["slots"].append(
+                SlotMetric(
+                    slot_name=r["slot_name"],
+                    score=round(avg_score, 1),
+                    total=slot_total,
+                    percentage=s_perc,
                 )
-
-        print(topic_map)
-
-        # Finalize Performance Metrics
-        topic_breakdown = [
-            PerformanceMetric(
-                id=tid,
-                label=data["name"],
-                score=data["score"],
-                total=data["total"],
-                percentage=round((data["score"] / data["total"]) * 100, 2),
-                slots=[
-                    SlotMetric(
-                        slot_name=sname,
-                        score=sdata["score"],
-                        total=sdata["total"],
-                        percentage=round((sdata["score"] / sdata["total"]) * 100, 2),
-                    )
-                    for sname, sdata in data["slots"].items()
-                ],
             )
-            for tid, data in topic_map.items()
-        ]
 
-        # Calculate overall competency based on the full exam items
-        overall_comp = (
-            (total_correct / total_exam_items) * 100 if total_exam_items > 0 else 0
-        )
+            topic_map[tid]["score"] += avg_score
+            topic_map[tid]["total"] += slot_total
+
+        # 3. Final Overall Competency
+        if official_total_items > 0:
+            overall_comp = (running_avg_numerator / official_total_items) * 100
+        else:
+            overall_comp = 0
 
         return ExamAnalyticsResponse(
             overall_competency=round(overall_comp, 2),
-            topic_breakdown=topic_breakdown,
-            question_logs=question_logs,
+            topic_breakdown=[
+                PerformanceMetric(
+                    id=tid,
+                    label=data["name"],
+                    score=round(data["score"], 1),
+                    total=data["total"],
+                    percentage=(
+                        round((data["score"] / data["total"]) * 100, 2)
+                        if data["total"] > 0
+                        else 0
+                    ),
+                    slots=data["slots"],
+                )
+                for tid, data in topic_map.items()
+            ],
         )
 
     @staticmethod
@@ -368,13 +333,28 @@ class AnalyticsController:
 
         return result
 
+    # python
     @router.post("/get_attempt_forensics", response_model=ForensicAttemptResponse)
     async def get_attempt_forensics_POST(
         req: ForensicAttemptRequest,
     ) -> ForensicAttemptResponse:
         target_user_id = None if req.user_id == -1 else req.user_id
 
-        # Updated SQL: JOINS source_references instead of questionnaire
+        # Store if the user specifically asked for "Latest" (-1)
+        is_latest_request = req.attempt_index == -1
+
+        actual_take_num = req.attempt_index
+        if is_latest_request:
+            # Fetch the max take_num for this context
+            latest_sql = "SELECT COUNT(DISTINCT attempt_index) as max_take FROM examination_results WHERE examination_id = %s"
+            latest_params = [req.examination_id]
+            if target_user_id:
+                latest_sql += " AND user_id = %s"
+                latest_params.append(target_user_id)
+
+            latest_res = db.select(latest_sql, tuple(latest_params))
+            actual_take_num = latest_res[0]["max_take"] if latest_res else 1
+
         sql = (
             """
             WITH RankedAttempts AS (
@@ -401,6 +381,7 @@ class AnalyticsController:
                 ANY_VALUE(qi.correct_answer) as correct_answer,
                 ANY_VALUE(c.id) as category_id, 
                 ANY_VALUE(c.name) as category_name, 
+                ANY_VALUE(sr.slot_name) as slot_name, 
                 ANY_VALUE(ia.reasoning) as reasoning,
                 ANY_VALUE(sa.student_answer) as student_answer, 
                 ANY_VALUE(sa.is_correct) as is_correct,
@@ -408,7 +389,6 @@ class AnalyticsController:
                 ANY_VALUE(sa.prev_cor) as prev_cor
             FROM StepAnalysis sa
             JOIN questionnaire_items qi ON sa.question_id = qi.id
-            -- JOIN mapping updated to source_references
             JOIN source_references sr ON qi.questionnaire_id = sr.id
             JOIN category c ON sr.category_id = c.id
             LEFT JOIN item_analysis ia ON qi.id = ia.item_id
@@ -417,9 +397,10 @@ class AnalyticsController:
         """
         )
 
-        params = [req.examination_id, req.attempt_index]
+        params = [req.examination_id]
         if target_user_id:
-            params.insert(1, target_user_id)
+            params.append(target_user_id)
+        params.append(actual_take_num)
 
         rows = db.select(sql, tuple(params))
 
@@ -430,7 +411,6 @@ class AnalyticsController:
                 if isinstance(r["choices"], str)
                 else r["choices"]
             )
-
             s_key = str(r["student_answer"]).strip().upper()
             c_key = str(r["correct_answer"]).strip().upper()
             norm_choices = {str(k).upper(): v for k, v in choices.items()}
@@ -442,13 +422,15 @@ class AnalyticsController:
                     key, f"Technical analysis for Option {key} is unavailable."
                 )
 
+            # Logic: If requested via -1, force comparative data to be empty
             p_val = r.get("prev_ans")
-            has_prev = p_val is not None
+            has_prev = (p_val is not None) and (not is_latest_request)
             p_key = str(p_val).strip().upper() if has_prev else ""
 
             item = ForensicLogItem(
                 category_id=r["category_id"],
                 category_name=r["category_name"],
+                slot_name=r["slot_name"],
                 question_text=r["question_text"],
                 correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
                 student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
@@ -462,7 +444,6 @@ class AnalyticsController:
                 option_c_analysis=get_ana("C"),
                 option_d_analysis=get_ana("D"),
             )
-
             comparative_items.append(item)
 
         return ForensicAttemptResponse(
