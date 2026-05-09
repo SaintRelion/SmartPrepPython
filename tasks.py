@@ -18,10 +18,10 @@ app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
 redis_client = Redis.from_url(REDIS_URL)
 
 app.conf.beat_schedule = {
-    # "run-analysis-every-3-minutes": {
-    #     "task": "analyze_unprocessed_items_task",
-    #     "schedule": 180.0,  # seconds
-    # },
+    "run-analysis-every-3-minutes": {
+        "task": "analyze_unprocessed_items_task",
+        "schedule": 180.0,  # seconds
+    },
     "run-attempt-analysis-every-2-minutes": {
         "task": "analyze_unprocessed_attempts_task",
         "schedule": 120.0,
