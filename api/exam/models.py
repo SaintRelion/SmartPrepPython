@@ -6,20 +6,15 @@ from datetime import datetime
 
 
 # --- REQUEST MODELS ---
+class ExamRuleRequest(BaseModel):
+    examination_id: int
+    per_question_timer: Optional[int] = 60
+    review_timer: Optional[int] = 300
+    status: Optional[int] = 1
+
+
 class RevieweeStatusIn(BaseModel):
     examination_id: int
-
-
-class QuestionOut(BaseModel):
-    id: int
-    question_text: str
-    choices: Dict[str, str]
-    correct_answer: str
-
-    @field_validator("choices", mode="before")
-    @classmethod
-    def parse_choices(cls, v: Any):
-        return json.loads(v) if isinstance(v, str) else v
 
 
 class ExamListRequest(BaseModel):
@@ -65,6 +60,12 @@ class ExamRenameResponse(BaseModel):
 # --- RESPONSE MODELS ---
 
 
+class ExamRuleResponse(BaseModel):
+    success: bool
+    message: str
+    rule: Optional[ExamRuleRequest] = None
+
+
 class ExamHistoryItem(BaseModel):
     examination_id: int
     answered_at: datetime
@@ -107,6 +108,7 @@ class SubmissionSummary(BaseModel):
 class QuestionOut(BaseModel):
     id: int
     question_text: str
+    correct_answer: str
     option_a: str = ""
     option_b: str = ""
     option_c: str = ""

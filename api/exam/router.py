@@ -15,6 +15,8 @@ from .models import (
     ExamOut,
     ExamRenameRequest,
     ExamRenameResponse,
+    ExamRuleRequest,
+    ExamRuleResponse,
     QuestionOut,
     RevieweeStatusIn,
     RevieweeStatusOut,
@@ -30,6 +32,74 @@ router = APIRouter(prefix="/exam", tags=["Exam"])
 
 
 class ExamController:
+    @router.post("/upsert_exam_rule", response_model=ExamRuleResponse)
+    async def upsert_exam_rule_POST(req: ExamRuleRequest) -> ExamRuleResponse:
+        try:
+            existing = db.select(
+                "SELECT id FROM examination_rule WHERE examination_id = %s",
+                (req.examination_id,),
+            )
+
+            if existing:
+                db.execute(
+                    "UPDATE examination_rule SET per_question_timer=%s, review_timer=%s, status=%s WHERE examination_id=%s",
+                    (
+                        req.per_question_timer,
+                        req.review_timer,
+                        req.status,
+                        req.examination_id,
+                    ),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO examination_rule (examination_id, per_question_timer, review_timer, status) VALUES (%s, %s, %s, %s)",
+                    (
+                        req.examination_id,
+                        req.per_question_timer,
+                        req.review_timer,
+                        req.status,
+                    ),
+                )
+
+            return ExamRuleResponse(
+                success=True, message="Rule saved successfully", data=req
+            )
+        except Exception as e:
+            return ExamRuleResponse(success=False, message=f"Database error: {str(e)}")
+
+    @router.get("/get_exam_rule", response_model=ExamRuleResponse)
+    async def get_exam_rule_GET(req: ExamRuleRequest = Depends()) -> ExamRuleResponse:
+        res = db.select(
+            "SELECT * FROM examination_rule WHERE examination_id = %s",
+            (req.examination_id,),
+        )
+        if res:
+            # Map DB row to the request model structure for the response data
+            rule_data = ExamRuleRequest(
+                examination_id=res[0]["examination_id"],
+                per_question_timer=res[0]["per_question_timer"],
+                review_timer=res[0]["review_timer"],
+                status=res[0]["status"],
+            )
+            return ExamRuleResponse(success=True, message="Rule found", rule=rule_data)
+
+        global_res = db.select(
+            "SELECT * FROM examination_rule WHERE examination_id = %s",
+            (-1,),
+        )
+        if global_res:
+            rule_data = ExamRuleRequest(
+                examination_id=req.examination_id,  # keep original id for context
+                per_question_timer=global_res[0]["per_question_timer"],
+                review_timer=global_res[0]["review_timer"],
+                status=global_res[0]["status"],
+            )
+            return ExamRuleResponse(
+                success=True, message="Using global rule", rule=rule_data
+            )
+
+        return ExamRuleResponse(success=False, message="No specific rule defined")
+
     @staticmethod
     @router.post("/generate_exam", response_model=ExamGenerationResponse)
     async def generate_exam_POST(req: ExamGenerationRequest) -> ExamGenerationResponse:
@@ -322,6 +392,14 @@ class ExamController:
             ON DUPLICATE KEY UPDATE attempts = attempts + 1
         """,
             (req.answers[0].examination_id, req.answers[0].user_id),
+        )
+
+        db.insert(
+            """
+            INSERT INTO examination_attempt_analysis (user_id, examination_id, attempt_index)
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, exam_id, new_attempt_index),
         )
 
         # Calculate immediate proficiency for the summary

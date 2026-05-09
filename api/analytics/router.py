@@ -1,10 +1,16 @@
 import json
 
+from api.analytics.helper import get_calculated_exam_stats
 from api.analytics.models import (
+    AIAnalysisData,
+    BasicAttemptLogItem,
+    BasicAttemptResponse,
     ComparativeTrendResponse,
     ForensicAttemptRequest,
     ForensicAttemptResponse,
     ForensicLogItem,
+    GenerateAnalysisRequest,
+    GenerateAnalysisResponse,
     GlobalExcellenceResponse,
     GrowthTrendResponse,
     LeaderEntry,
@@ -18,10 +24,65 @@ from utils.db import db
 
 from fastapi import APIRouter
 
+from utils.ollama import analyze_overall_examination_ollama
+
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 class AnalyticsController:
+    @staticmethod
+    @router.post("/generate_overall_analysis", response_model=GenerateAnalysisResponse)
+    async def generate_overall_analysis_POST(
+        req: GenerateAnalysisRequest,
+    ) -> GenerateAnalysisResponse:
+        try:
+            batch_stats = get_calculated_exam_stats(examination_id=req.examination_id)
+
+            if not batch_stats or batch_stats["overall_competency"] == 0:
+                return GenerateAnalysisResponse(
+                    success=False,
+                    message="No data available to analyze. Waiting for student submissions.",
+                    data=None,
+                )
+
+            topics = batch_stats["topic_breakdown"]
+            worst_topics = sorted(topics, key=lambda x: x["percentage"])[:2]
+
+            # 3. Call your specific Ollama function
+            ai_response = analyze_overall_examination_ollama(
+                overall_accuracy=batch_stats["overall_competency"],
+                worst_topics=worst_topics,
+                full_breakdown=topics,
+            )
+
+            if not ai_response or "summary" not in ai_response:
+                print("AI failed to generate a valid response. Please try again.")
+                return GenerateAnalysisResponse(
+                    success=False,
+                    message="AI failed to generate a valid response. Please try again.",
+                    data=None,
+                )
+
+            db.execute(
+                "UPDATE examinations SET analysis = %s WHERE id = %s",
+                (json.dumps(ai_response), req.examination_id),
+            )
+
+            print("AI generated a valid response.")
+            return GenerateAnalysisResponse(
+                success=True,
+                message="Batch analysis generated successfully.",
+                data=AIAnalysisData(**ai_response),
+            )
+
+        except Exception as e:
+            print(f"Error generating overall analysis: {e}")
+            return GenerateAnalysisResponse(
+                success=False,
+                message=f"An internal error occurred: {str(e)}",
+                data=None,
+            )
+
     @staticmethod
     @router.get("/get_leaderboard", response_model=GlobalExcellenceResponse)
     async def get_leaderboard_GET() -> GlobalExcellenceResponse:
@@ -108,155 +169,113 @@ class AnalyticsController:
 
     @router.post("/get_exam_analytics", response_model=ExamAnalyticsResponse)
     async def get_exam_analytics_POST(req: StatsRequest) -> ExamAnalyticsResponse:
-        meta_sql = """
-            SELECT 
-                (SELECT total_items FROM examinations WHERE id = %s) as total_items,
-                (SELECT COUNT(DISTINCT user_id) FROM examination_results WHERE examination_id = %s) as user_count
-        """
-        meta = db.select(meta_sql, (req.examination_id, req.examination_id))[0]
-
-        official_total_items = float(meta["total_items"] or 0)
-        user_count = float(meta["user_count"] if not req.user_id else 1)
-        div = user_count if user_count > 0 else 1.0
-
-        # 2. SQL Aggregation: Use examination_questions for the Denominator
-        sql = """
-            SELECT 
-                c.id as category_id,
-                c.name as category_name,
-                sr.slot_name,
-                SUM(CAST(er.is_correct AS UNSIGNED)) as total_correct_in_batch,
-                (
-                    SELECT COUNT(*) 
-                    FROM examination_questions eq2
-                    JOIN questionnaire_items qi2 ON eq2.questionnaire_item_id = qi2.id
-                    WHERE eq2.examination_id = %s AND qi2.questionnaire_id = sr.id
-                ) as exam_slot_total
-            FROM examination_results er
-            JOIN examination_attempts ea ON er.examination_id = ea.examination_id 
-                AND er.user_id = ea.user_id 
-                AND er.attempt_index = ea.attempts 
-            JOIN questionnaire_items qi ON er.question_id = qi.id
-            JOIN source_references sr ON qi.questionnaire_id = sr.id
-            JOIN category c ON sr.category_id = c.id
-            WHERE er.examination_id = %s
-        """
-
-        # We pass the exam_id twice: once for the subquery denominator, once for the results
-        params = [req.examination_id, req.examination_id]
-        if req.user_id:
-            sql += " AND er.user_id = %s"
-            params.append(req.user_id)
-
-        sql += " GROUP BY c.id, sr.id"
-        rows = db.select(sql, tuple(params))
-
-        topic_map = {}
-        running_avg_numerator = 0.0
-
-        for r in rows:
-            tid = r["category_id"]
-            if tid not in topic_map:
-                topic_map[tid] = {
-                    "name": r["category_name"],
-                    "score": 0.0,
-                    "total": 0.0,
-                    "slots": [],
-                }
-
-            # DENOMINATOR: Only items assigned to THIS exam
-            slot_total = float(r["exam_slot_total"] or 0)
-
-            # NUMERATOR: Average score (Batch Sum / User Count)
-            avg_score = float(r["total_correct_in_batch"]) / div
-            running_avg_numerator += avg_score
-
-            s_perc = round((avg_score / slot_total) * 100, 2) if slot_total > 0 else 0
-
-            topic_map[tid]["slots"].append(
-                SlotMetric(
-                    slot_name=r["slot_name"],
-                    score=round(avg_score, 1),
-                    total=slot_total,
-                    percentage=s_perc,
-                )
+        try:
+            stats_data = get_calculated_exam_stats(
+                examination_id=req.examination_id, user_id=req.user_id
             )
 
-            topic_map[tid]["score"] += avg_score
-            topic_map[tid]["total"] += slot_total
+            ai_data_obj = None
+            if stats_data.get("ai_analysis"):
+                ai_data_obj = AIAnalysisData(**stats_data["ai_analysis"])
 
-        # 3. Final Overall Competency
-        if official_total_items > 0:
-            overall_comp = (running_avg_numerator / official_total_items) * 100
-        else:
-            overall_comp = 0
-
-        return ExamAnalyticsResponse(
-            overall_competency=round(overall_comp, 2),
-            topic_breakdown=[
-                PerformanceMetric(
-                    id=tid,
-                    label=data["name"],
-                    score=round(data["score"], 1),
-                    total=data["total"],
-                    percentage=(
-                        round((data["score"] / data["total"]) * 100, 2)
-                        if data["total"] > 0
-                        else 0
-                    ),
-                    slots=data["slots"],
-                )
-                for tid, data in topic_map.items()
-            ],
-        )
+            return ExamAnalyticsResponse(
+                overall_competency=stats_data["overall_competency"],
+                topic_breakdown=[
+                    PerformanceMetric(
+                        id=topic["id"],
+                        label=topic["label"],
+                        score=topic["score"],
+                        total=topic["total"],
+                        percentage=topic["percentage"],
+                        slots=topic["slots"],
+                    )
+                    for topic in stats_data["topic_breakdown"]
+                ],
+                ai_analysis=ai_data_obj,
+            )
+        except Exception as e:
+            print(f"Error generating analytics: {e}")
+            return ExamAnalyticsResponse(overall_competency=0, topic_breakdown=[])
 
     @staticmethod
     @router.post("/get_comparative_trend", response_model=ComparativeTrendResponse)
     async def get_comparative_trend_POST(req: StatsRequest) -> ComparativeTrendResponse:
-        params = [req.examination_id]
+        params_inner = [req.examination_id]
         user_filter = ""
-
-        # If a user_id is provided, we only look at that student's progression.
-        # If not, we look at the entire batch's progression per take number.
         if req.user_id and req.user_id > 0:
-            user_filter = " AND user_id = %s"
-            params.append(req.user_id)
+            user_filter = "AND user_id = %s"
+            params_inner.append(req.user_id)
 
+        # ---------------------------------------------------------------
+        # Inner subquery: for each (user, date), pick the highest
+        # attempt_index that falls ON OR BEFORE that date (closest-left).
+        # This handles gaps from deleted/skipped attempts gracefully.
+        # ---------------------------------------------------------------
         sql = f"""
-            SELECT 
+            SELECT
                 res.date_recorded,
-                AVG(res.accuracy) as average_accuracy,
-                COUNT(DISTINCT res.user_id) as examinee_count,
-                ROW_NUMBER() OVER (ORDER BY res.date_recorded ASC) as attempt_number
+                AVG(res.accuracy)                                   AS average_accuracy,
+                COUNT(DISTINCT res.user_id)                         AS examinee_count,
+                GROUP_CONCAT(res.user_id ORDER BY res.user_id)      AS examinee_ids,
+                GROUP_CONCAT(res.attempt_index ORDER BY res.user_id) AS attempt_indices,
+                ROW_NUMBER() OVER (ORDER BY res.date_recorded ASC)  AS attempt_number
             FROM (
-                SELECT 
-                    user_id, 
-                    DATE(answered_at) as date_recorded,
-                    (COUNT(CASE WHEN is_correct = 1 THEN 1 END) * 100.0 / COUNT(*)) as accuracy
-                FROM examination_results
-                WHERE (user_id, examination_id, attempt_index) IN (
-                    SELECT user_id, examination_id, MAX(attempt_index)
-                    FROM examination_results
-                    WHERE examination_id = %s {user_filter}
-                    GROUP BY user_id, examination_id, DATE(answered_at)
+                -- Per (user, date): pick the MAX attempt_index whose DATE(answered_at)
+                -- is <= that date — i.e. "closest left" for any gaps.
+                SELECT
+                    er.user_id,
+                    DATE(er.answered_at)                                        AS date_recorded,
+                    MAX(er.attempt_index)                                       AS attempt_index,
+                    (COUNT(CASE WHEN er.is_correct = 1 THEN 1 END) * 100.0
+                    / COUNT(*))                                                AS accuracy
+                FROM examination_results er
+                WHERE er.examination_id = %s
+                {user_filter}
+                AND (er.user_id, er.attempt_index) IN (
+                    -- For each user+date, find the highest attempt_index
+                    -- that was recorded on or before that date (closest-left).
+                    SELECT
+                        sub.user_id,
+                        MAX(sub.attempt_index)
+                    FROM examination_results sub
+                    WHERE sub.examination_id = %s
+                        {user_filter}
+                    GROUP BY sub.user_id, DATE(sub.answered_at)
                 )
-                GROUP BY user_id, examination_id, DATE(answered_at)
+                GROUP BY er.user_id, er.examination_id, DATE(er.answered_at)
             ) res
             GROUP BY res.date_recorded
             ORDER BY res.date_recorded ASC
         """
 
+        # params: outer WHERE needs exam_id [+ user_id], subquery needs same again
+        params = params_inner + params_inner
         trends = db.select(sql, tuple(params))
 
-        # Format dates for the Chart Labels
+        # ---------------------------------------------------------------
+        # Post-process: format dates, unpack parallel id/index arrays,
+        # then BUILD a per-user map so the VB side can look up
+        # attempt_index by user_id without relying on positional alignment.
+        # ---------------------------------------------------------------
         for row in trends:
             if row.get("date_recorded"):
-                # Format as "Jan 26"
                 row["date_recorded"] = row["date_recorded"].strftime("%b %d")
+
+            raw_ids = row.get("examinee_ids", "") or ""
+            raw_idx = row.get("attempt_indices", "") or ""
+
+            id_list = [int(x) for x in raw_ids.split(",") if x]
+            idx_list = [int(x) for x in raw_idx.split(",") if x]
+
+            row["examinee_ids"] = id_list
+            row["attempt_indices"] = idx_list
+
+            # Paired map: { user_id: attempt_index } — both lists were
+            # ORDER BY user_id in GROUP_CONCAT so they are aligned.
+            row["attempt_map"] = {uid: aidx for uid, aidx in zip(id_list, idx_list)}
 
         improvement_score = 0
         status = "Stable"
-
         if len(trends) >= 2:
             prev = trends[-2]["average_accuracy"]
             curr = trends[-1]["average_accuracy"]
@@ -333,77 +352,284 @@ class AnalyticsController:
 
         return result
 
-    # python
+    @router.post("/get_attempt_basic_comparison", response_model=BasicAttemptResponse)
+    async def get_attempt_basic_comparison_POST(
+        req: ForensicAttemptRequest,
+    ) -> BasicAttemptResponse:
+        target_user_id = None if req.user_id == -1 else req.user_id
+
+        if target_user_id:
+            # PATH 1: Single user, specific attempt index resolved by caller
+            sql = """
+                WITH CurrentAttempt AS (
+                    SELECT * FROM examination_results
+                    WHERE examination_id = %s AND user_id = %s AND attempt_index = %s
+                ),
+                PrevAttempt AS (
+                    SELECT * FROM examination_results
+                    WHERE examination_id = %s AND user_id = %s
+                    AND attempt_index = (
+                        SELECT MAX(attempt_index) FROM examination_results
+                        WHERE examination_id = %s AND user_id = %s AND attempt_index < %s
+                    )
+                )
+                SELECT
+                    qi.id as question_id,
+                    ANY_VALUE(qi.question_text) as question_text,
+                    ANY_VALUE(qi.choices) as choices,
+                    ANY_VALUE(qi.correct_answer) as correct_answer,
+                    ANY_VALUE(c.id) as category_id,
+                    ANY_VALUE(c.name) as category_name,
+                    ANY_VALUE(sr.slot_name) as slot_name,
+                    ANY_VALUE(cur.student_answer) as student_answer,
+                    ANY_VALUE(cur.is_correct) as is_correct,
+                    ANY_VALUE(prev.student_answer) as prev_ans,
+                    ANY_VALUE(prev.is_correct) as prev_cor
+                FROM CurrentAttempt cur
+                JOIN questionnaire_items qi ON cur.question_id = qi.id
+                JOIN source_references sr ON qi.questionnaire_id = sr.id
+                JOIN category c ON sr.category_id = c.id
+                JOIN examination_questions eq ON eq.questionnaire_item_id = qi.id
+                    AND eq.examination_id = %s
+                LEFT JOIN PrevAttempt prev ON prev.question_id = cur.question_id
+                GROUP BY qi.id, eq.id
+                ORDER BY eq.id ASC
+            """
+            params = [
+                req.examination_id,
+                target_user_id,
+                req.attempt_index,  # CurrentAttempt
+                req.examination_id,
+                target_user_id,  # PrevAttempt WHERE
+                req.examination_id,
+                target_user_id,
+                req.attempt_index,  # PrevAttempt subquery
+                req.examination_id,  # eq JOIN
+            ]
+        else:
+            # PATH 3: Full batch — no specific user, aggregate max attempt per user
+            sql = """
+                WITH CurrentAttempt AS (
+                    SELECT examination_results.*
+                    FROM examination_results
+                    JOIN (
+                        SELECT user_id, MAX(attempt_index) as max_idx
+                        FROM examination_results
+                        WHERE examination_id = %s
+                        GROUP BY user_id
+                    ) latest ON examination_results.user_id = latest.user_id
+                        AND examination_results.attempt_index = latest.max_idx
+                    WHERE examination_results.examination_id = %s
+                ),
+                PrevAttempt AS (
+                    SELECT examination_results.*
+                    FROM examination_results
+                    JOIN (
+                        SELECT er.user_id, MAX(er.attempt_index) as prev_idx
+                        FROM examination_results er
+                        JOIN (
+                            SELECT user_id, MAX(attempt_index) as max_idx
+                            FROM examination_results
+                            WHERE examination_id = %s
+                            GROUP BY user_id
+                        ) latest ON er.user_id = latest.user_id
+                            AND er.attempt_index < latest.max_idx
+                        WHERE er.examination_id = %s
+                        GROUP BY er.user_id
+                    ) prev_latest ON examination_results.user_id = prev_latest.user_id
+                        AND examination_results.attempt_index = prev_latest.prev_idx
+                    WHERE examination_results.examination_id = %s
+                )
+                SELECT
+                    qi.id as question_id,
+                    ANY_VALUE(qi.question_text) as question_text,
+                    ANY_VALUE(qi.choices) as choices,
+                    ANY_VALUE(qi.correct_answer) as correct_answer,
+                    ANY_VALUE(c.id) as category_id,
+                    ANY_VALUE(c.name) as category_name,
+                    ANY_VALUE(sr.slot_name) as slot_name,
+                    ANY_VALUE(cur.student_answer) as student_answer,
+                    ANY_VALUE(cur.is_correct) as is_correct,
+                    ANY_VALUE(prev.student_answer) as prev_ans,
+                    ANY_VALUE(prev.is_correct) as prev_cor
+                FROM CurrentAttempt cur
+                JOIN questionnaire_items qi ON cur.question_id = qi.id
+                JOIN source_references sr ON qi.questionnaire_id = sr.id
+                JOIN category c ON sr.category_id = c.id
+                JOIN examination_questions eq ON eq.questionnaire_item_id = qi.id
+                    AND eq.examination_id = %s
+                LEFT JOIN PrevAttempt prev ON prev.question_id = cur.question_id
+                    AND prev.user_id = cur.user_id
+                GROUP BY qi.id, eq.id
+                ORDER BY eq.id ASC
+            """
+            params = [
+                req.examination_id,  # CurrentAttempt inner subquery
+                req.examination_id,  # CurrentAttempt WHERE
+                req.examination_id,  # PrevAttempt inner-inner subquery
+                req.examination_id,  # PrevAttempt inner WHERE
+                req.examination_id,  # PrevAttempt outer WHERE
+                req.examination_id,  # eq JOIN
+            ]
+
+        rows = db.select(sql, tuple(params))
+        basic_items = []
+        for r in rows:
+            choices = (
+                json.loads(r["choices"])
+                if isinstance(r["choices"], str)
+                else r["choices"]
+            )
+            s_key = str(r["student_answer"]).strip().upper()
+            c_key = str(r["correct_answer"]).strip().upper()
+            norm_choices = {str(k).upper(): v for k, v in choices.items()}
+            p_val = r.get("prev_ans")
+            has_prev = p_val is not None
+            p_key = str(p_val).strip().upper() if has_prev else ""
+            basic_items.append(
+                BasicAttemptLogItem(
+                    category_id=r["category_id"],
+                    category_name=r["category_name"],
+                    slot_name=r["slot_name"],
+                    question_text=r["question_text"],
+                    correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
+                    student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
+                    is_correct=bool(r["is_correct"]),
+                    previous_student_answer=(
+                        f"({p_key}) {norm_choices.get(p_key, 'N/A')}"
+                        if has_prev
+                        else ""
+                    ),
+                    previous_is_correct=bool(r.get("prev_cor")) if has_prev else False,
+                )
+            )
+        return BasicAttemptResponse(success=True, items=basic_items)
+
     @router.post("/get_attempt_forensics", response_model=ForensicAttemptResponse)
     async def get_attempt_forensics_POST(
         req: ForensicAttemptRequest,
     ) -> ForensicAttemptResponse:
         target_user_id = None if req.user_id == -1 else req.user_id
 
-        # Store if the user specifically asked for "Latest" (-1)
-        is_latest_request = req.attempt_index == -1
-
-        actual_take_num = req.attempt_index
-        if is_latest_request:
-            # Fetch the max take_num for this context
-            latest_sql = "SELECT COUNT(DISTINCT attempt_index) as max_take FROM examination_results WHERE examination_id = %s"
-            latest_params = [req.examination_id]
-            if target_user_id:
-                latest_sql += " AND user_id = %s"
-                latest_params.append(target_user_id)
-
-            latest_res = db.select(latest_sql, tuple(latest_params))
-            actual_take_num = latest_res[0]["max_take"] if latest_res else 1
-
-        sql = (
-            """
-            WITH RankedAttempts AS (
-                SELECT 
-                    er.*,
-                    DENSE_RANK() OVER (PARTITION BY er.user_id ORDER BY er.answered_at ASC) as take_num
-                FROM examination_results er
-                WHERE er.examination_id = %s
-                """
-            + ("AND er.user_id = %s" if target_user_id else "")
-            + """
-            ),
-            StepAnalysis AS (
-                SELECT 
-                    ra.*,
-                    LAG(ra.student_answer) OVER (PARTITION BY ra.user_id, ra.question_id ORDER BY ra.take_num ASC) as prev_ans,
-                    LAG(ra.is_correct) OVER (PARTITION BY ra.user_id, ra.question_id ORDER BY ra.take_num ASC) as prev_cor
-                FROM RankedAttempts ra
-            )
-            SELECT 
-                qi.id as question_id, 
-                ANY_VALUE(qi.question_text) as question_text, 
-                ANY_VALUE(qi.choices) as choices, 
-                ANY_VALUE(qi.correct_answer) as correct_answer,
-                ANY_VALUE(c.id) as category_id, 
-                ANY_VALUE(c.name) as category_name, 
-                ANY_VALUE(sr.slot_name) as slot_name, 
-                ANY_VALUE(ia.reasoning) as reasoning,
-                ANY_VALUE(sa.student_answer) as student_answer, 
-                ANY_VALUE(sa.is_correct) as is_correct,
-                ANY_VALUE(sa.prev_ans) as prev_ans, 
-                ANY_VALUE(sa.prev_cor) as prev_cor
-            FROM StepAnalysis sa
-            JOIN questionnaire_items qi ON sa.question_id = qi.id
-            JOIN source_references sr ON qi.questionnaire_id = sr.id
-            JOIN category c ON sr.category_id = c.id
-            LEFT JOIN item_analysis ia ON qi.id = ia.item_id
-            WHERE sa.take_num = %s
-            GROUP BY qi.id
-        """
-        )
-
-        params = [req.examination_id]
         if target_user_id:
-            params.append(target_user_id)
-        params.append(actual_take_num)
+            # PATH 1: Single user, specific attempt index resolved by caller
+            sql = """
+                WITH CurrentAttempt AS (
+                    SELECT * FROM examination_results
+                    WHERE examination_id = %s AND user_id = %s AND attempt_index = %s
+                ),
+                PrevAttempt AS (
+                    SELECT * FROM examination_results
+                    WHERE examination_id = %s AND user_id = %s
+                    AND attempt_index = (
+                        SELECT MAX(attempt_index) FROM examination_results
+                        WHERE examination_id = %s AND user_id = %s AND attempt_index < %s
+                    )
+                )
+                SELECT
+                    qi.id as question_id,
+                    ANY_VALUE(qi.question_text) as question_text,
+                    ANY_VALUE(qi.choices) as choices,
+                    ANY_VALUE(qi.correct_answer) as correct_answer,
+                    ANY_VALUE(c.id) as category_id,
+                    ANY_VALUE(c.name) as category_name,
+                    ANY_VALUE(sr.slot_name) as slot_name,
+                    ANY_VALUE(ia.reasoning) as reasoning,
+                    ANY_VALUE(cur.student_answer) as student_answer,
+                    ANY_VALUE(cur.is_correct) as is_correct,
+                    ANY_VALUE(prev.student_answer) as prev_ans,
+                    ANY_VALUE(prev.is_correct) as prev_cor
+                FROM CurrentAttempt cur
+                JOIN questionnaire_items qi ON cur.question_id = qi.id
+                JOIN source_references sr ON qi.questionnaire_id = sr.id
+                JOIN category c ON sr.category_id = c.id
+                LEFT JOIN item_analysis ia ON qi.id = ia.item_id
+                JOIN examination_questions eq ON eq.questionnaire_item_id = qi.id
+                    AND eq.examination_id = %s
+                LEFT JOIN PrevAttempt prev ON prev.question_id = cur.question_id
+                GROUP BY qi.id, eq.id
+                ORDER BY eq.id ASC
+            """
+            params = [
+                req.examination_id,
+                target_user_id,
+                req.attempt_index,  # CurrentAttempt
+                req.examination_id,
+                target_user_id,  # PrevAttempt WHERE
+                req.examination_id,
+                target_user_id,
+                req.attempt_index,  # PrevAttempt subquery
+                req.examination_id,  # eq JOIN
+            ]
+        else:
+            # PATH 2: Full batch — aggregate max attempt per user
+            sql = """
+                WITH CurrentAttempt AS (
+                    SELECT examination_results.*
+                    FROM examination_results
+                    JOIN (
+                        SELECT user_id, MAX(attempt_index) as max_idx
+                        FROM examination_results
+                        WHERE examination_id = %s
+                        GROUP BY user_id
+                    ) latest ON examination_results.user_id = latest.user_id
+                        AND examination_results.attempt_index = latest.max_idx
+                    WHERE examination_results.examination_id = %s
+                ),
+                PrevAttempt AS (
+                    SELECT examination_results.*
+                    FROM examination_results
+                    JOIN (
+                        SELECT er.user_id, MAX(er.attempt_index) as prev_idx
+                        FROM examination_results er
+                        JOIN (
+                            SELECT user_id, MAX(attempt_index) as max_idx
+                            FROM examination_results
+                            WHERE examination_id = %s
+                            GROUP BY user_id
+                        ) latest ON er.user_id = latest.user_id
+                            AND er.attempt_index < latest.max_idx
+                        WHERE er.examination_id = %s
+                        GROUP BY er.user_id
+                    ) prev_latest ON examination_results.user_id = prev_latest.user_id
+                        AND examination_results.attempt_index = prev_latest.prev_idx
+                    WHERE examination_results.examination_id = %s
+                )
+                SELECT
+                    qi.id as question_id,
+                    ANY_VALUE(qi.question_text) as question_text,
+                    ANY_VALUE(qi.choices) as choices,
+                    ANY_VALUE(qi.correct_answer) as correct_answer,
+                    ANY_VALUE(c.id) as category_id,
+                    ANY_VALUE(c.name) as category_name,
+                    ANY_VALUE(sr.slot_name) as slot_name,
+                    ANY_VALUE(ia.reasoning) as reasoning,
+                    ANY_VALUE(cur.student_answer) as student_answer,
+                    ANY_VALUE(cur.is_correct) as is_correct,
+                    ANY_VALUE(prev.student_answer) as prev_ans,
+                    ANY_VALUE(prev.is_correct) as prev_cor
+                FROM CurrentAttempt cur
+                JOIN questionnaire_items qi ON cur.question_id = qi.id
+                JOIN source_references sr ON qi.questionnaire_id = sr.id
+                JOIN category c ON sr.category_id = c.id
+                LEFT JOIN item_analysis ia ON qi.id = ia.item_id
+                JOIN examination_questions eq ON eq.questionnaire_item_id = qi.id
+                    AND eq.examination_id = %s
+                LEFT JOIN PrevAttempt prev ON prev.question_id = cur.question_id
+                    AND prev.user_id = cur.user_id
+                GROUP BY qi.id, eq.id
+                ORDER BY eq.id ASC
+            """
+            params = [
+                req.examination_id,  # CurrentAttempt inner subquery
+                req.examination_id,  # CurrentAttempt WHERE
+                req.examination_id,  # PrevAttempt inner-inner subquery
+                req.examination_id,  # PrevAttempt inner WHERE
+                req.examination_id,  # PrevAttempt outer WHERE
+                req.examination_id,  # eq JOIN
+            ]
 
         rows = db.select(sql, tuple(params))
-
         comparative_items = []
         for r in rows:
             choices = (
@@ -414,38 +640,37 @@ class AnalyticsController:
             s_key = str(r["student_answer"]).strip().upper()
             c_key = str(r["correct_answer"]).strip().upper()
             norm_choices = {str(k).upper(): v for k, v in choices.items()}
-
             analysis_dict = json.loads(r["reasoning"]) if r.get("reasoning") else {}
 
-            def get_ana(key):
-                return analysis_dict.get(
+            def get_ana(key, _ad=analysis_dict):
+                return _ad.get(
                     key, f"Technical analysis for Option {key} is unavailable."
                 )
 
-            # Logic: If requested via -1, force comparative data to be empty
             p_val = r.get("prev_ans")
-            has_prev = (p_val is not None) and (not is_latest_request)
+            has_prev = p_val is not None
             p_key = str(p_val).strip().upper() if has_prev else ""
-
-            item = ForensicLogItem(
-                category_id=r["category_id"],
-                category_name=r["category_name"],
-                slot_name=r["slot_name"],
-                question_text=r["question_text"],
-                correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
-                student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
-                is_correct=bool(r["is_correct"]),
-                previous_student_answer=(
-                    f"({p_key}) {norm_choices.get(p_key, 'N/A')}" if has_prev else ""
-                ),
-                previous_is_correct=bool(r.get("prev_cor")) if has_prev else False,
-                option_a_analysis=get_ana("A"),
-                option_b_analysis=get_ana("B"),
-                option_c_analysis=get_ana("C"),
-                option_d_analysis=get_ana("D"),
+            comparative_items.append(
+                ForensicLogItem(
+                    category_id=r["category_id"],
+                    category_name=r["category_name"],
+                    slot_name=r["slot_name"],
+                    question_text=r["question_text"],
+                    correct_answer=f"({c_key}) {norm_choices.get(c_key, 'N/A')}",
+                    student_answer=f"({s_key}) {norm_choices.get(s_key, 'N/A')}",
+                    is_correct=bool(r["is_correct"]),
+                    previous_student_answer=(
+                        f"({p_key}) {norm_choices.get(p_key, 'N/A')}"
+                        if has_prev
+                        else ""
+                    ),
+                    previous_is_correct=bool(r.get("prev_cor")) if has_prev else False,
+                    option_a_analysis=get_ana("A"),
+                    option_b_analysis=get_ana("B"),
+                    option_c_analysis=get_ana("C"),
+                    option_d_analysis=get_ana("D"),
+                )
             )
-            comparative_items.append(item)
-
         return ForensicAttemptResponse(
             success=True, comparative_items=comparative_items
         )

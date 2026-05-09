@@ -1,6 +1,10 @@
 from pydantic import BaseModel
 
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+
+class GenerateAnalysisRequest(BaseModel):
+    examination_id: int
 
 
 class ForensicAttemptRequest(BaseModel):
@@ -38,9 +42,21 @@ class PerformanceMetric(BaseModel):
 PerformanceMetric.model_rebuild()
 
 
+class AIAnalysisData(BaseModel):
+    summary: str
+    recommendations: List[str]
+
+
+class GenerateAnalysisResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[AIAnalysisData] = None
+
+
 class ExamAnalyticsResponse(BaseModel):
     overall_competency: float
     topic_breakdown: List[PerformanceMetric]
+    ai_analysis: Optional[AIAnalysisData] = None
 
 
 class LeaderEntry(BaseModel):
@@ -64,16 +80,36 @@ class BatchPerformance(BaseModel):
     attempt_number: int
     average_accuracy: float
     examinee_count: int
+    examinee_ids: List[int]
+    attempt_indices: List[int]
+    attempt_map: Dict[int, int]
     date_recorded: Optional[str] = None
 
 
 class ComparativeTrendResponse(BaseModel):
     exam_id: int
     user_id: Optional[int] = None
-    trend_label: str  # e.g., "Individual Progress" or "Batch Trends"
-    current_status: str  # "Improving", "Regressing", or "Stable"
-    delta: float  # The difference between the last two attempts
+    trend_label: str
+    current_status: str
+    delta: float
     history: List[BatchPerformance]
+
+
+class BasicAttemptLogItem(BaseModel):
+    category_id: int
+    category_name: str
+    slot_name: str
+    question_text: str
+    correct_answer: str
+    student_answer: str
+    is_correct: bool
+    previous_student_answer: str = ""
+    previous_is_correct: bool = False
+
+
+class BasicAttemptResponse(BaseModel):
+    success: bool
+    items: List[BasicAttemptLogItem]
 
 
 class ForensicLogItem(BaseModel):

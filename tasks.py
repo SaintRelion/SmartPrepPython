@@ -4,8 +4,9 @@ import PyPDF2
 import json
 from celery import Celery
 from celery.utils.log import get_task_logger
+from api.analytics.helper import get_calculated_exam_stats
 from utils.db import db
-from utils.ollama import analyze_item_ollama
+from utils.ollama import analyze_attempt_ollama, analyze_item_ollama
 from redis import Redis
 
 logger = get_task_logger(__name__)
@@ -17,14 +18,70 @@ app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
 redis_client = Redis.from_url(REDIS_URL)
 
 app.conf.beat_schedule = {
-    "run-analysis-every-3-minutes": {
-        "task": "analyze_unprocessed_items_task",
-        "schedule": 180.0,  # seconds
+    # "run-analysis-every-3-minutes": {
+    #     "task": "analyze_unprocessed_items_task",
+    #     "schedule": 180.0,  # seconds
+    # },
+    "run-attempt-analysis-every-2-minutes": {
+        "task": "analyze_unprocessed_attempts_task",
+        "schedule": 120.0,
     },
 }
 
 
-@app.task(name="analyze_unprocessed_items_task")
+@app.task(name="analyze_unprocessed_attempts_task", queue="exam_queue")
+def analyze_unprocessed_attempts_task():
+    lock_id = "lock_exam_attempt_analysis"
+    acquire_lock = redis_client.set(lock_id, "true", nx=True, ex=600)
+
+    if not acquire_lock:
+        logger.info("Attempt analysis task running. Skipping.")
+        return "skipped"
+
+    try:
+        sql = """
+            SELECT id, user_id, examination_id, attempt_index 
+            FROM examination_attempt_analysis 
+            WHERE analysis IS NULL OR analysis = ''
+            LIMIT 10
+        """
+        pending_attempts = db.select(sql)
+
+        if not pending_attempts:
+            return
+
+        for attempt in pending_attempts:
+            try:
+                # 1. Fetch this specific user's stats
+                stats = get_calculated_exam_stats(
+                    examination_id=attempt["examination_id"], user_id=attempt["user_id"]
+                )
+
+                topics = stats["topic_breakdown"]
+
+                worst_first_topics = sorted(topics, key=lambda x: x["percentage"])
+
+                analysis_result = analyze_attempt_ollama(
+                    exam_name="Exam",  # Fetch this from your DB if needed
+                    overall_accuracy=stats["overall_competency"],
+                    topic_breakdown=worst_first_topics,  # Now it has the full context!
+                )
+
+                if analysis_result and "summary" in analysis_result:
+                    db.execute(
+                        "UPDATE examination_attempt_analysis SET analysis=%s WHERE id=%s",
+                        (json.dumps(analysis_result), attempt["id"]),
+                    )
+                logger.info(f"Attempt {attempt['id']} analyzed successfully.")
+
+            except Exception as e:
+                logger.error(f"Failed to analyze attempt {attempt['id']}: {e}")
+
+    finally:
+        redis_client.delete(lock_id)
+
+
+@app.task(name="analyze_unprocessed_items_task", queue="item_queue")
 def analyze_unprocessed_items_task():
     lock_id = "lock_analyze_task"
 
@@ -198,7 +255,6 @@ def _find_context_in_text(full_text: str, choices: dict) -> str:
         for chunk in chunks:
             chunk_lower = chunk.lower()
 
-            # HARD REQUIREMENT: Every single tech word MUST be present in this chunk
             if all(word in chunk_lower for word in tech_words):
                 all_found_contexts.append(chunk)
                 break  # Move to the next choice once a context is found
