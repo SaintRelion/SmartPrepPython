@@ -13,9 +13,11 @@ from api.analytics.models import (
     GenerateAnalysisResponse,
     GlobalExcellenceResponse,
     GrowthTrendResponse,
+    ItemAnalysisRequest,
+    ItemAnalysisResponse,
     LeaderEntry,
     PerformanceMetric,
-    SlotMetric,
+    QuestionDistribution,
     StatsRequest,
     ExamAnalyticsResponse,
     SubjectLeaderboard,
@@ -252,11 +254,6 @@ class AnalyticsController:
         params = params_inner + params_inner
         trends = db.select(sql, tuple(params))
 
-        # ---------------------------------------------------------------
-        # Post-process: format dates, unpack parallel id/index arrays,
-        # then BUILD a per-user map so the VB side can look up
-        # attempt_index by user_id without relying on positional alignment.
-        # ---------------------------------------------------------------
         for row in trends:
             if row.get("date_recorded"):
                 row["date_recorded"] = row["date_recorded"].strftime("%b %d")
@@ -296,7 +293,57 @@ class AnalyticsController:
             "history": trends,
         }
 
-    # Though 'slot' but this is grouped by category, didnt bother remaining
+    @staticmethod
+    @router.post("/get_item_analysis", response_model=ItemAnalysisResponse)
+    async def get_item_analysis_POST(req: ItemAnalysisRequest) -> ItemAnalysisResponse:
+        rows = db.select(
+            """
+            SELECT 
+                eia.date, 
+                eia.question_id, 
+                eia.distribution, 
+                eia.analysis, 
+                eia.calculated_at,
+                q.question_text,
+                q.correct_answer
+            FROM examination_item_analysis eia
+            JOIN questionnaire_items q ON q.id = eia.question_id
+            WHERE eia.examination_id = %s
+            ORDER BY eia.date ASC, eia.question_id ASC
+            """,
+            (req.examination_id,),
+        )
+
+        # Group by date
+        batches: dict[str, dict] = {}
+        for row in rows:
+            date_key = str(row["date"])
+            if date_key not in batches:
+                batches[date_key] = {
+                    "dateBatch": date_key,
+                    "questions": {},
+                    "analysis": {},
+                    "calculated_at": (
+                        str(row["calculated_at"]) if row["calculated_at"] else None
+                    ),
+                }
+
+            batches[date_key]["questions"][str(row["question_id"])] = {
+                **json.loads(row["distribution"]),
+                "question_text": row["question_text"],
+                "correct_answer": row["correct_answer"],
+            }
+            if row["analysis"]:
+                batches[date_key]["analysis"][str(row["question_id"])] = row["analysis"]
+
+        result = {
+            "examination_id": req.examination_id,
+            "items": list(batches.values()),
+        }
+
+        # print(result)
+        return result
+
     @staticmethod
     @router.post("/get_slot_growth_trend", response_model=GrowthTrendResponse)
     async def get_slot_growth_trend_POST(req: StatsRequest) -> GrowthTrendResponse:
@@ -307,7 +354,6 @@ class AnalyticsController:
             user_filter = " AND er.user_id = %s"
             params.append(req.user_id)
 
-        # UPDATED: Join Category table and Group by Category instead of Slot
         sql = f"""
             SELECT 
                 DATE(er.answered_at) as date_recorded,

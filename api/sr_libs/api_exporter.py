@@ -197,32 +197,47 @@ def register_model_recursive(spec: dict, model_cls: Any):
     for name, field in model_cls.model_fields.items():
         annotation = field.annotation
 
-        # 1. Detect if it is a List at the field level
         origin = get_origin(annotation)
         is_list = origin in [list, List]
+        is_dict = origin in [dict, Dict]  # ADD
 
-        # 2. Unwrap List/Optional/Union to get the core type
         inner_type = annotation
+
         if is_list:
             inner_type = get_args(annotation)[0]
+        elif is_dict:
+            args = get_args(annotation)
+            if len(args) > 1 and hasattr(args[1], "model_fields"):
+                # Value is a Pydantic model — unwrap and recurse
+                inner_type = args[1]
+            else:
+                # Primitive value (str, int, etc.) — treat as plain dict
+                is_dict = True
+                inner_type = annotation
 
-        # Handle Optional (Union[T, None])
+        # Handle Optional
         if get_origin(inner_type) is Union:
             args = get_args(inner_type)
             inner_type = [t for t in args if t is not type(None)][0]
-            # Re-check list if it was Optional[List[int]]
             if get_origin(inner_type) in [list, List]:
                 is_list = True
                 inner_type = get_args(inner_type)[0]
+            elif get_origin(inner_type) in [dict, Dict]:
+                args = get_args(inner_type)
+                if len(args) > 1 and hasattr(args[1], "model_fields"):
+                    is_dict = True
+                    inner_type = args[1]
 
         spec["models"][m_name][name] = {
             "type": get_type_name(inner_type),
             "is_list": is_list,
+            "is_dict": is_dict,  # ADD so VB side knows
         }
 
-        # 3. Recurse if the inner type is another Pydantic model
         if hasattr(inner_type, "model_fields"):
-            register_model_recursive(spec, inner_type)
+            register_model_recursive(
+                spec, inner_type
+            )  # now recurses into QuestionDistribution
 
 
 def build_sr_spec():

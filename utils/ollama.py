@@ -8,6 +8,73 @@ OLLAMA_MODEL = "qwen3.5:35b"
 client = Client(host=OLLAMA_HOST, timeout=300.0)
 
 
+def analyze_item_distribution_ollama(
+    examination_id: int,
+    date: str,
+    items: list,
+) -> dict:
+    system_instruction: str = (
+        "You are an expert Criminology Professor and psychometrician reviewing board exam results. "
+        "You will receive choice distribution data showing how many students picked each option. "
+        "Your job is to write a concise diagnostic for each question based purely on the numbers. "
+        "\n\nGUIDELINES:\n"
+        "- Focus on what the distribution reveals: high distractor pull, guessing patterns, conceptual confusion.\n"
+        "- Never mention missing data, data integrity, or unknown values.\n"
+        "- Never say a question is unanalyzable. Always write something useful.\n"
+        "- If only one option was chosen, note that students were confident — correct or not.\n"
+        "- Tone: Direct, instructor-facing, actionable. One sentence per question.\n"
+    )
+
+    prompt: str = f"""
+    [EXAM DATA]
+    Examination ID: {examination_id}
+    Batch Date: {date}
+
+    [ITEM DISTRIBUTION]
+    {json.dumps(items, indent=2)}
+
+    Return ONLY this JSON format:
+    {{
+        "summary": "2-3 sentences on overall class performance patterns for this batch.",
+        "analysis": {{
+            "QUESTION_ID": "One sentence diagnostic for this question.",
+            "QUESTION_ID": "One sentence diagnostic for this question."
+        }}
+    }}
+
+    Rules:
+    - Keys in 'analysis' must be the exact question_id values from the input above.
+    - Every question_id in the input must appear in 'analysis'.
+    - Write diagnostics based on the numbers only. Do not speculate about missing data.
+    - Do not use A/B/C/D as keys. Use the numeric question IDs.
+    """
+
+    try:
+        response = client.generate(
+            model=OLLAMA_MODEL,
+            system=system_instruction,
+            prompt=prompt,
+            format="json",
+            stream=False,
+            think=False,
+        )
+        raw_text = response.get("response", "")
+        if not raw_text:
+            print(
+                f"Ollama returned empty response for item analysis exam {examination_id}."
+            )
+            return None
+
+        return json.loads(raw_text)
+
+    except json.JSONDecodeError as je:
+        print(f"JSON decode error for item analysis: {je} | Raw: {raw_text}")
+        return None
+    except Exception as e:
+        print(f"Ollama call error for item analysis: {e}")
+        return None
+
+
 def analyze_overall_examination_ollama(
     overall_accuracy: float,
     worst_topics: list,

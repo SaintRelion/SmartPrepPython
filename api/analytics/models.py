@@ -3,6 +3,10 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional
 
 
+class ItemAnalysisRequest(BaseModel):
+    examination_id: int
+
+
 class GenerateAnalysisRequest(BaseModel):
     examination_id: int
 
@@ -146,3 +150,25 @@ class GrowthTrendResponse(BaseModel):
     trend_label: str
     unique_slots: List[str]  # Legend: ["Criminal Law", "Evidence", etc.]
     history: List[SlotHistoryPoint]
+
+
+class QuestionDistribution(BaseModel):
+    A: int = 0
+    B: int = 0
+    C: int = 0
+    D: int = 0
+    total: int = 0
+    question_text: str | None = None
+    correct_answer: str | None = None
+
+
+class ItemAnalysisBatch(BaseModel):
+    dateBatch: str
+    questions: dict[str, QuestionDistribution]
+    analysis: dict | None = None
+    calculated_at: str | None = None
+
+
+class ItemAnalysisResponse(BaseModel):
+    examination_id: int
+    items: List[ItemAnalysisBatch]

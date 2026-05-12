@@ -402,6 +402,44 @@ class ExamController:
             (user_id, exam_id, new_attempt_index),
         )
 
+        today_str = now.strftime("%Y-%m-%d")
+        dist_sql = """
+            SELECT er.question_id, er.student_answer, COUNT(*) AS tally
+            FROM examination_results er
+            WHERE er.examination_id = %s AND DATE(er.answered_at) = %s
+            GROUP BY er.question_id, er.student_answer
+        """
+        dist_rows = db.select(dist_sql, (exam_id, today_str))
+
+        distribution: dict[int, dict[str, int]] = {}
+        for row in dist_rows:
+            qid = row["question_id"]
+            ans = (row["student_answer"] or "").strip().upper()
+            tally = row["tally"]
+            if qid not in distribution:
+                distribution[qid] = {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0}
+            if ans in ("A", "B", "C", "D"):
+                distribution[qid][ans] += tally
+                distribution[qid]["total"] += tally
+
+        for qid, choices in distribution.items():
+            # choices = {"A": 0, "B": 3, "C": 1, "D": 0, "total": 4}
+            choice_json = {
+                k: v for k, v in choices.items() if k != "total"
+            }  # only A/B/C/D
+            db.insert(
+                """
+                INSERT INTO examination_item_analysis 
+                    (examination_id, date, question_id, distribution, analysis)
+                VALUES (%s, %s, %s, %s, NULL)
+                ON DUPLICATE KEY UPDATE
+                    distribution = VALUES(distribution),
+                    analysis = NULL,
+                    calculated_at = NULL
+                """,
+                (exam_id, today_str, qid, json.dumps(choice_json)),
+            )
+
         # Calculate immediate proficiency for the summary
         percentage = (correct_count / total_items * 100) if total_items > 0 else 0
 
