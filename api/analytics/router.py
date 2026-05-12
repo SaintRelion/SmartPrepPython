@@ -172,6 +172,9 @@ class AnalyticsController:
     @router.post("/get_exam_analytics", response_model=ExamAnalyticsResponse)
     async def get_exam_analytics_POST(req: StatsRequest) -> ExamAnalyticsResponse:
         try:
+            if req.user_id == 0:
+                req.user_id = None
+
             stats_data = get_calculated_exam_stats(
                 examination_id=req.examination_id, user_id=req.user_id
             )
@@ -180,7 +183,7 @@ class AnalyticsController:
             if stats_data.get("ai_analysis"):
                 ai_data_obj = AIAnalysisData(**stats_data["ai_analysis"])
 
-            return ExamAnalyticsResponse(
+            result = ExamAnalyticsResponse(
                 overall_competency=stats_data["overall_competency"],
                 topic_breakdown=[
                     PerformanceMetric(
@@ -195,6 +198,8 @@ class AnalyticsController:
                 ],
                 ai_analysis=ai_data_obj,
             )
+
+            return result
         except Exception as e:
             print(f"Error generating analytics: {e}")
             return ExamAnalyticsResponse(overall_competency=0, topic_breakdown=[])
@@ -341,7 +346,7 @@ class AnalyticsController:
             "items": list(batches.values()),
         }
 
-        # print(result)
+        print(result)
         return result
 
     @staticmethod

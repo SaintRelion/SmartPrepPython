@@ -402,20 +402,24 @@ class ExamController:
             (user_id, exam_id, new_attempt_index),
         )
 
-        today_str = now.strftime("%Y-%m-%d")
+        # ✅ use DATE() from the DB so it matches what's stored
         dist_sql = """
-            SELECT er.question_id, er.student_answer, COUNT(*) AS tally
+            SELECT er.question_id, er.student_answer, DATE(er.answered_at) AS answer_date, COUNT(*) AS tally
             FROM examination_results er
-            WHERE er.examination_id = %s AND DATE(er.answered_at) = %s
-            GROUP BY er.question_id, er.student_answer
+            WHERE er.examination_id = %s AND DATE(er.answered_at) = DATE(%s)
+            GROUP BY er.question_id, er.student_answer, DATE(er.answered_at)
         """
-        dist_rows = db.select(dist_sql, (exam_id, today_str))
+        dist_rows = db.select(dist_sql, (exam_id, now))
 
-        distribution: dict[int, dict[str, int]] = {}
+        distribution: dict[int, dict] = {}
+        answer_date = None
+
         for row in dist_rows:
             qid = row["question_id"]
             ans = (row["student_answer"] or "").strip().upper()
             tally = row["tally"]
+            answer_date = str(row["answer_date"])  # pulled from DB, guaranteed to match
+
             if qid not in distribution:
                 distribution[qid] = {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0}
             if ans in ("A", "B", "C", "D"):
@@ -423,10 +427,7 @@ class ExamController:
                 distribution[qid]["total"] += tally
 
         for qid, choices in distribution.items():
-            # choices = {"A": 0, "B": 3, "C": 1, "D": 0, "total": 4}
-            choice_json = {
-                k: v for k, v in choices.items() if k != "total"
-            }  # only A/B/C/D
+            choice_json = {k: v for k, v in choices.items() if k != "total"}
             db.insert(
                 """
                 INSERT INTO examination_item_analysis 
@@ -437,7 +438,12 @@ class ExamController:
                     analysis = NULL,
                     calculated_at = NULL
                 """,
-                (exam_id, today_str, qid, json.dumps(choice_json)),
+                (
+                    exam_id,
+                    answer_date,
+                    qid,
+                    json.dumps(choice_json),
+                ),  # answer_date not today_str
             )
 
         # Calculate immediate proficiency for the summary

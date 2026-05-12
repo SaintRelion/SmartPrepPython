@@ -46,16 +46,20 @@ def analyze_unprocessed_exam_items_task():
         logger.info("Item analysis task already running. Skipping.")
         return "skipped"
     try:
-        # Get all unanalyzed rows, grouped by exam+date batch
         pending = db.select("""
             SELECT examination_id, date
             FROM examination_item_analysis
-            WHERE analysis IS NULL 
-                OR TRIM(analysis) = ''
+            WHERE NULLIF(TRIM(COALESCE(analysis, '')), '') IS NULL
             GROUP BY examination_id, date
             LIMIT 5
         """)
+
+        logger.info(
+            f"[item_analysis] Pending batches found: {len(pending) if pending else 0}"
+        )
+
         if not pending:
+            logger.info("[item_analysis] Nothing to process. Exiting.")
             return
 
         for batch in pending:
@@ -63,20 +67,28 @@ def analyze_unprocessed_exam_items_task():
                 exam_id = batch["examination_id"]
                 date = str(batch["date"])
 
-                # Pull all questions for this exam+date batch
+                logger.info(f"[item_analysis] Processing exam_id={exam_id} date={date}")
+
                 rows = db.select(
                     """
                     SELECT id, question_id, distribution
                     FROM examination_item_analysis
-                    WHERE examination_id = %s AND date = %s AND analysis IS NULL
-                """,
+                    WHERE examination_id = %s AND date = %s
+                    AND NULLIF(TRIM(COALESCE(analysis, '')), '') IS NULL
+                    """,
                     (exam_id, date),
                 )
 
+                logger.info(
+                    f"[item_analysis] exam_id={exam_id} date={date} — rows to analyze: {len(rows) if rows else 0}"
+                )
+
                 if not rows:
+                    logger.warning(
+                        f"[item_analysis] No rows for exam_id={exam_id} date={date}, skipping."
+                    )
                     continue
 
-                # Enrich with question meta
                 question_ids = [r["question_id"] for r in rows]
                 placeholders = ",".join(["%s"] * len(question_ids))
                 questions = db.select(
@@ -85,57 +97,90 @@ def analyze_unprocessed_exam_items_task():
                 )
                 question_map = {str(q["id"]): q for q in questions}
 
-                enriched = []
-                row_ids = []
+                logger.info(
+                    f"[item_analysis] exam_id={exam_id} — question meta fetched: {len(questions)}, mapped: {len(question_map)}"
+                )
+
+                missing_meta = [
+                    str(r["question_id"])
+                    for r in rows
+                    if str(r["question_id"]) not in question_map
+                ]
+                if missing_meta:
+                    logger.warning(
+                        f"[item_analysis] exam_id={exam_id} — missing question meta for IDs: {missing_meta}"
+                    )
+
+                written, skipped = 0, 0
+
                 for r in rows:
-                    row_ids.append(r["id"])
                     qid = str(r["question_id"])
                     dist = json.loads(r["distribution"])
                     meta = question_map.get(qid, {})
                     total = sum(dist.get(k, 0) for k in ("A", "B", "C", "D"))
-                    enriched.append(
-                        {
-                            "question_id": qid,
-                            "question_text": meta.get("question_text", ""),
-                            "correct_answer": meta.get("correct_answer", ""),
-                            "distribution": {
-                                "A": dist.get("A", 0),
-                                "B": dist.get("B", 0),
-                                "C": dist.get("C", 0),
-                                "D": dist.get("D", 0),
-                                "total": total,
-                            },
-                        }
+
+                    item = {
+                        "question_id": qid,
+                        "question_text": meta.get("question_text", ""),
+                        "correct_answer": meta.get("correct_answer", ""),
+                        "distribution": {
+                            "A": dist.get("A", 0),
+                            "B": dist.get("B", 0),
+                            "C": dist.get("C", 0),
+                            "D": dist.get("D", 0),
+                            "total": total,
+                        },
+                    }
+
+                    logger.info(
+                        f"[item_analysis] exam_id={exam_id} — analyzing question_id={qid} row_id={r['id']}"
                     )
 
-                analysis_result = analyze_item_distribution_ollama(
-                    examination_id=exam_id,
-                    date=date,
-                    items=enriched,
-                )
+                    result = analyze_item_distribution_ollama(
+                        examination_id=exam_id,
+                        date=date,
+                        items=[item],
+                    )
 
-                if not analysis_result:
-                    continue
+                    if not result:
+                        logger.warning(
+                            f"[item_analysis] exam_id={exam_id} — no result for question_id={qid} row_id={r['id']}, skipping."
+                        )
+                        skipped += 1
+                        continue
 
-                # analysis_result["analysis"] = {"545": "text", "546": "text", ...}
-                analysis_map = analysis_result.get("analysis", {})
-                summary = analysis_result.get("summary", "")
-
-                # Write per-question analysis back to each row
-                for r in rows:
-                    qid = str(r["question_id"])
+                    analysis_map = result.get("analysis", {})
                     per_question = analysis_map.get(qid, "")
+
+                    if not per_question:
+                        logger.warning(
+                            f"[item_analysis] exam_id={exam_id} — Ollama returned empty analysis for question_id={qid}. Keys returned: {list(analysis_map.keys())}"
+                        )
+                        skipped += 1
+                    else:
+                        logger.info(
+                            f"[item_analysis] exam_id={exam_id} — question_id={qid} analysis: {per_question}"
+                        )
+                        written += 1
+
                     db.update(
                         """
                         UPDATE examination_item_analysis
                         SET analysis = %s, calculated_at = NOW()
                         WHERE id = %s
-                    """,
+                        """,
                         (per_question, r["id"]),
                     )
 
+                logger.info(
+                    f"[item_analysis] exam_id={exam_id} date={date} — done. written={written} skipped={skipped}"
+                )
+
             except Exception as e:
-                logger.error(f"Item analysis error for exam {batch}: {e}")
+                logger.error(
+                    f"[item_analysis] Error processing batch {batch}: {e}",
+                    exc_info=True,
+                )
                 continue
     finally:
         redis_client.delete(lock_id)

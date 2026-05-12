@@ -15,40 +15,72 @@ def analyze_item_distribution_ollama(
 ) -> dict:
     system_instruction: str = (
         "You are an expert Criminology Professor and psychometrician reviewing board exam results. "
-        "You will receive choice distribution data showing how many students picked each option. "
-        "Your job is to write a concise diagnostic for each question based purely on the numbers. "
-        "\n\nGUIDELINES:\n"
-        "- Focus on what the distribution reveals: high distractor pull, guessing patterns, conceptual confusion.\n"
+        "You will receive aggregated answer choice distributions showing how many STUDENTS (reviewees) "
+        "selected each option across an entire exam batch — not a single respondent. "
+        "Your job is to write a concise psychometric diagnostic for each question based on the distribution pattern.\n\n"
+        "GUIDELINES:\n"
+        "- Always frame analysis in terms of the GROUP: 'students', 'most examinees', 'the class', etc.\n"
+        "- Never say 'the respondent' — this is aggregate data from all reviewees in the batch.\n"
+        "- Identify which distractor attracted the most pull and what conceptual confusion it suggests.\n"
+        "- If correct_answer is known: note whether students converged on it or scattered across distractors.\n"
+        "- If total=1: say 'only one student answered this item' and note their choice.\n"
+        "- If all students picked the same option: note strong consensus — correct or not.\n"
+        "- Focus on what the distribution reveals: guessing patterns, conceptual gaps, distractor effectiveness.\n"
+        "- Tone: Direct, instructor-facing, actionable. 1-2 sentences per question.\n"
         "- Never mention missing data, data integrity, or unknown values.\n"
-        "- Never say a question is unanalyzable. Always write something useful.\n"
-        "- If only one option was chosen, note that students were confident — correct or not.\n"
-        "- Tone: Direct, instructor-facing, actionable. One sentence per question.\n"
     )
+
+    # Pre-compute per-item correct/incorrect context to guide the model
+    items_with_context = []
+    for item in items:
+        dist = item["distribution"]
+        correct = item.get("correct_answer", "").strip().upper()
+        total = dist.get("total", 0)
+        correct_count = (
+            dist.get(correct, 0) if correct in ("A", "B", "C", "D") else None
+        )
+        top_choice = max(("A", "B", "C", "D"), key=lambda k: dist.get(k, 0))
+        items_with_context.append(
+            {
+                **item,
+                "total_responses": total,
+                "top_selected_option": top_choice,
+                "top_selected_count": dist.get(top_choice, 0),
+                "correct_answer_count": correct_count,
+                "majority_correct": (
+                    (correct_count == max(dist.get(k, 0) for k in ("A", "B", "C", "D")))
+                    if correct_count is not None
+                    else None
+                ),
+            }
+        )
 
     prompt: str = f"""
     [EXAM DATA]
     Examination ID: {examination_id}
     Batch Date: {date}
+    Context: These distributions represent ALL student responses aggregated across this exam batch.
+            Each number is how many students chose that option — not a single person.
 
     [ITEM DISTRIBUTION]
-    {json.dumps(items, indent=2)}
+    {json.dumps(items_with_context, indent=2)}
 
     Return ONLY this JSON format:
     {{
-        "summary": "2-3 sentences on overall class performance patterns for this batch.",
+        "summary": "2-3 sentences on overall class performance patterns: correct answer rates, distractor pull trends, areas of conceptual weakness.",
         "analysis": {{
-            "QUESTION_ID": "One sentence diagnostic for this question.",
-            "QUESTION_ID": "One sentence diagnostic for this question."
+            "QUESTION_ID": "1-2 sentence psychometric diagnostic framed around the GROUP of students.",
+            "QUESTION_ID": "1-2 sentence psychometric diagnostic framed around the GROUP of students."
         }}
     }}
 
     Rules:
-    - Keys in 'analysis' must be the exact question_id values from the input above.
+    - Keys in 'analysis' must be the exact numeric question_id values from the input.
     - Every question_id in the input must appear in 'analysis'.
-    - Write diagnostics based on the numbers only. Do not speculate about missing data.
-    - Do not use A/B/C/D as keys. Use the numeric question IDs.
+    - Never say 'the respondent' — always refer to 'students', 'examinees', or 'the class'.
+    - Base diagnostics on the distribution numbers and the correct_answer field.
+    - Do not use A/B/C/D as keys in 'analysis'. Use the numeric question IDs only.
     """
-
     try:
         response = client.generate(
             model=OLLAMA_MODEL,
@@ -64,9 +96,7 @@ def analyze_item_distribution_ollama(
                 f"Ollama returned empty response for item analysis exam {examination_id}."
             )
             return None
-
         return json.loads(raw_text)
-
     except json.JSONDecodeError as je:
         print(f"JSON decode error for item analysis: {je} | Raw: {raw_text}")
         return None
