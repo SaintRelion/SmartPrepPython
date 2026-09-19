@@ -1,9 +1,10 @@
 import json
 
+import os
 from ollama import Client
 
-OLLAMA_HOST = "http://REMOVED_AWS_OLLAMA_HOST:11434"
-OLLAMA_MODEL = "qwen3.5:35b"
+OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:35b")
 
 client = Client(host=OLLAMA_HOST, timeout=300.0)
 

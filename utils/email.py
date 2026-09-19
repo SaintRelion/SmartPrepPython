@@ -4,10 +4,12 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # SMTP Configuration
-EMAIL_SENDER = "REMOVED_SMTP_SENDER"
-EMAIL_PASSWORD = "REMOVED_SMTP_APP_PASSWORD"
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
+import os
+
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
 
 def send_recovery_email(target_email: str, token: str):
