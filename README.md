@@ -50,6 +50,36 @@ Questionnaire PDFs can be uploaded into topic slots and extracted into structure
 
 Runtime source files are stored under `uploads/questionnaires/` and `uploads/materials/`.
 
+## Questionnaire document format
+
+Questionnaires, examination materials, and other confidential source documents are runtime/local data and are intentionally **not included in this repository**.
+
+Questionnaire PDFs cannot use an arbitrary layout. To keep uploads fast on the hardware available when SmartPrep was developed, questionnaire ingestion uses a lightweight **pattern/regex-based parser** instead of sending the entire PDF through the local LLM. The PDF should contain text in this structure:
+
+```text
+1. Question text
+A. First choice
+B. Second choice
+C. Third choice
+D. Fourth choice
+Answer: A
+
+2. Next question
+A. First choice
+B. Second choice
+C. Third choice
+D. Fourth choice
+Answer: C
+```
+
+Questions must start with a number followed by `.` or `)`, choices must use `A`–`D` followed by `.` or `)`, and each item needs at least two choices plus an `Answer:` line. The answer may be the choice letter or the matching choice text. PDFs must also contain extractable text; scanned image-only PDFs require OCR first.
+
+If an existing questionnaire uses another layout, you can ask ChatGPT, Claude, or another capable model to reformat it before uploading:
+
+> Reformat this questionnaire without changing its questions, choices, or correct answers. Output each item as: a numbered question (`1.`), choices labeled `A.` through `D.`, and a final `Answer: X` line containing the correct choice letter. Keep each question, choice, and answer on its own line. Do not add explanations, remove questions, or invent answers.
+
+This was a deliberate performance tradeoff: deterministic parsing keeps questionnaire uploads immediate and reserves the local Ollama model for the analytical workflows where LLM reasoning is more useful.
+
 ## Technology stack
 
 | Area | Technology |
