@@ -2,26 +2,16 @@
 
 SmartPrep Python is the backend service for **SmartPrep**, a criminology review and examination platform. It provides the API, persistence, document-processing, background-analysis, real-time notification, and LLM-assisted analytics used by the SmartPrep Modern Windows desktop client.
 
-> **Project context:** The complete SmartPrep system was developed under a compressed delivery timeline of less than two months. The backend combines a FastAPI application with a relational database, Redis, Celery workers, scheduled analysis jobs, WebSockets, PDF ingestion, and Ollama-backed analysis workflows.
+> **Project context:** The complete SmartPrep system was developed in under two months. This backend combines FastAPI, MySQL, Redis/Celery, WebSockets, PDF processing, and Ollama-backed analysis.
 
-## System responsibilities
+## Key features
 
-The backend exposes domain-specific API modules for:
-
-- User registration, login, account management, status control, and password recovery
-- Categories and topic/source slots
-- PDF questionnaire and study-material uploads
-- Questionnaire extraction into structured questions
-- Exam rules and exam generation
-- Exam listing, retrieval, reviewee assignment/status, and answer submission
-- Global and per-subject leaderboards
-- Exam analytics and comparative performance trends
-- Topic growth trends
-- Basic attempt comparisons and deeper attempt forensics
-- Per-question distribution analysis
-- AI-generated attempt, item, and cohort-level analysis
-- WebSocket connections and update notifications
-- API schema export for the companion client
+- **Exam and source APIs** — manages categories, topic slots, PDF sources, exam rules, generation, assignments, and submissions.
+- **PDF questionnaire extraction** — processes uploaded questionnaire files into structured questions used by the exam workflow.
+- **Analytics and forensics** — provides leaderboards, trends, attempt comparisons, question distributions, and deeper item/attempt analysis.
+- **Background analysis** — Celery and Redis run scheduled analytical jobs outside the request cycle.
+- **LLM-assisted insights** — Ollama-backed workflows generate structured performance analysis and recommendations.
+- **Real-time updates** — WebSocket endpoints support live client notifications and synchronization.
 
 ## Architecture
 
@@ -54,31 +44,11 @@ SmartPrep Modern (WPF desktop client)
                  analysis jobs
 ```
 
-## Background analysis
+## Processing workflow
 
-`tasks.py` defines scheduled Celery workflows for asynchronous analysis. Redis is used as both the Celery broker/backend and as a distributed lock so the same analysis category is not processed concurrently by multiple scheduled runs.
+Questionnaire PDFs can be uploaded into topic slots and extracted into structured questions for exam generation. Celery workers handle scheduled exam, attempt, and item analysis, with Redis used for task coordination and locking. LLM analysis returns structured results consumed by the desktop analytics interface.
 
-The scheduled workflows include:
-
-- Examination item-distribution analysis
-- Examination-attempt analysis
-- Individual question/item analysis
-
-The LLM layer produces structured JSON used by the analytics UI for instructor-facing diagnostics, reviewee feedback, recommendations, and question-level explanations.
-
-## PDF/source workflow
-
-The `/slots/upload_source_file` endpoint accepts questionnaire or study-material PDFs. Uploaded files are separated into questionnaire/material storage, and questionnaire files are passed through the extraction pipeline to create structured questionnaire items associated with a topic slot.
-
-Runtime uploads are stored under:
-
-```text
-uploads/
-├── questionnaires/
-└── materials/
-```
-
-These directories can be populated with test documents after the application is running.
+Runtime source files are stored under `uploads/questionnaires/` and `uploads/materials/`.
 
 ## Technology stack
 
