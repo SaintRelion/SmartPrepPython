@@ -93,14 +93,7 @@ docker compose up -d --build
 
 ### Dependency management
 
-The Python project uses **Astral uv** with `pyproject.toml` and
-`uv.lock`. Docker installs the locked environment with `uv sync`,
-keeping dependency resolution consistent between development and the
-image.
-
-Application source is kept under `src/`, while project/deployment files
-such as `pyproject.toml`, `uv.lock`, `.env`, Dockerfile, and Compose
-remain at the repository root.
+Python dependencies are managed with **Astral uv** through `pyproject.toml` and `uv.lock`. The Docker image uses `uv sync --frozen` so local development and container builds use the same locked dependency graph without maintaining a separate `requirements.txt` installation path.
 
 ## How SmartPrep processes questionnaires
 
@@ -241,13 +234,6 @@ Run SmartPrep Modern and point its API base URL to:
 ``` text
 http://127.0.0.1:8000/
 ```
-
-## Security
-
-Secrets and service credentials are intentionally not committed. If a
-credential was previously committed to Git history, it should be
-revoked/rotated and removed from history rather than only deleting it
-from the latest file.
 
 ## Author
 
