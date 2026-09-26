@@ -1,0 +1,18 @@
+[project]
+name = "smartpreppython"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "celery>=5.6.3",
+    "fastapi>=0.141.1",
+    "mysql-connector-python>=26.7.0",
+    "ollama>=0.6.2",
+    "pydantic>=2.13.5",
+    "pyjwt>=2.15.0",
+    "pypdf2>=3.0.1",
+    "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+    "redis>=8.1.0",
+    "uvicorn>=0.54.0",
+]

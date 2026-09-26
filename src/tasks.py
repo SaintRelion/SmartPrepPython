@@ -16,10 +16,14 @@ from redis import Redis
 
 logger = get_task_logger(__name__)
 
-# Use REDIS_URL from .env or default to Index 1
-REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
-app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
+# Redis defaults to localhost for direct/local execution.
+# Docker Compose overrides REDIS_HOST to the internal Redis service name.
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = os.getenv("REDIS_PORT", "6379")
+REDIS_DB = os.getenv("REDIS_DB", "1")
+REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
 
+app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
 redis_client = Redis.from_url(REDIS_URL)
 
 app.conf.beat_schedule = {

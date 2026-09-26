@@ -1,0 +1,117 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: smartprep-mysql
+    restart: unless-stopped
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+
+    ports:
+      - "${DB_DOCKER_PORT:-3307}:3306"
+
+    volumes:
+      - smartprep_mysql:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u${DB_USER} -p${DB_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: smartprep-redis
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: smartprep-api
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      DB_HOST: mysql
+      REDIS_HOST: redis
+      OLLAMA_HOST: http://host.docker.internal:11434
+
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+    volumes:
+      - ./uploads:/app/uploads
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  celery-worker:
+    build: .
+    container_name: smartprep-celery-worker
+    restart: unless-stopped
+
+    command: celery -A tasks.app worker -l info -Q exam_item_queue,exam_attempts_queue,question_item_queue
+
+    env_file:
+      - .env
+
+    environment:
+      DB_HOST: mysql
+      REDIS_HOST: redis
+      OLLAMA_HOST: http://host.docker.internal:11434
+
+    volumes:
+      - ./uploads:/app/uploads
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  celery-beat:
+    build: .
+    container_name: smartprep-celery-beat
+    restart: unless-stopped
+
+    command: celery -A tasks.app beat -l info
+
+    env_file:
+      - .env
+
+    environment:
+      DB_HOST: mysql
+      REDIS_HOST: redis
+      OLLAMA_HOST: http://host.docker.internal:11434
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  smartprep_mysql:
